@@ -97,11 +97,23 @@ const wsUrl = (() => {
   return `${proto}://${location.host}/ws`;
 })();
 
-const ws = new WebSocket(wsUrl);
-ws.binaryType = 'arraybuffer';
+let ws: WebSocket;
+let reconnectAttempt = 0;
+let reconnectTimer: number | null = null;
+
+// Log-spaced backoff: equally spaced on a log scale between min and max,
+// reaching the ceiling around attempt 6. ±25% jitter avoids thundering herds.
+const RECONNECT_MIN_MS = 3000;
+const RECONNECT_MAX_MS = 30000;
+const RECONNECT_STEPS = 6;
+const RECONNECT_FACTOR = Math.pow(RECONNECT_MAX_MS / RECONNECT_MIN_MS, 1 / RECONNECT_STEPS);
+function reconnectDelay(attempt: number): number {
+  const base = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * Math.pow(RECONNECT_FACTOR, attempt));
+  return base * (0.75 + Math.random() * 0.5);
+}
 
 const send = (bytes: Uint8Array) => {
-  if (ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const ab = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(ab).set(bytes);
   ws.send(ab);
@@ -117,45 +129,62 @@ new StampUi(stampsEl, stampState);
 selection.onChange(scheduleFrame);
 stampState.onChange(scheduleFrame);
 
-ws.addEventListener('open', () => {
-  // A frame may have already run while the socket was CONNECTING - it would have
-  // skipped the wire send but still recorded the desired set as `current`, leaving
-  // the server with zero subscriptions. Force a re-sub now.
-  subscription.reset();
-  scheduleFrame();
-});
-ws.addEventListener('close', () => {
-  liveChunks = 0;
-  tickRateHz = 0;
-  tickUtilization = 0;
-  cache.clear();
-  subscription.reset();
-  scheduleFrame();
-});
-ws.addEventListener('error', () => { scheduleFrame(); });
-ws.addEventListener('message', (e) => {
-  const msg: ServerMsg = decodeServer(e.data as ArrayBuffer);
-  switch (msg.kind) {
-    case 'Hello':
-      break;
-    case 'ChunkState':
-    case 'ChunkDelta':
-      cache.put(msg.cx, msg.cy, msg.tick, msg.bits);
-      break;
-    case 'Regions':
-      cache.setRegions(msg.regions);
-      break;
-    case 'Reaped':
-      cache.drop(msg.cx, msg.cy);
-      break;
-    case 'Stats':
-      liveChunks = msg.liveChunks;
-      tickRateHz = msg.tickRateHzMilli / 1000;
-      tickUtilization = msg.tickUtilizationMilli / 1000;
-      break;
-  }
-  scheduleFrame();
-});
+function connect() {
+  reconnectTimer = null;
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+
+  ws.addEventListener('open', () => {
+    reconnectAttempt = 0;
+    // A frame may have already run while the socket was CONNECTING - it would have
+    // skipped the wire send but still recorded the desired set as `current`, leaving
+    // the server with zero subscriptions. Force a re-sub now.
+    subscription.reset();
+    scheduleFrame();
+  });
+  ws.addEventListener('close', (e) => {
+    liveChunks = 0;
+    tickRateHz = 0;
+    tickUtilization = 0;
+    cache.clear();
+    subscription.reset();
+    scheduleFrame();
+    if (reconnectTimer === null) {
+      const delay = reconnectDelay(reconnectAttempt++);
+      console.warn(`websocket closed (code=${e.code}, reason=${e.reason || 'n/a'}, clean=${e.wasClean}); reconnect attempt ${reconnectAttempt} in ${Math.round(delay)}ms`);
+      reconnectTimer = window.setTimeout(connect, delay);
+    }
+  });
+  ws.addEventListener('error', () => {
+    console.warn('websocket error');
+    scheduleFrame();
+  });
+  ws.addEventListener('message', (e) => {
+    const msg: ServerMsg = decodeServer(e.data as ArrayBuffer);
+    switch (msg.kind) {
+      case 'Hello':
+        break;
+      case 'ChunkState':
+      case 'ChunkDelta':
+        cache.put(msg.cx, msg.cy, msg.tick, msg.bits);
+        break;
+      case 'Regions':
+        cache.setRegions(msg.regions);
+        break;
+      case 'Reaped':
+        cache.drop(msg.cx, msg.cy);
+        break;
+      case 'Stats':
+        liveChunks = msg.liveChunks;
+        tickRateHz = msg.tickRateHzMilli / 1000;
+        tickUtilization = msg.tickUtilizationMilli / 1000;
+        break;
+    }
+    scheduleFrame();
+  });
+}
+
+connect();
 
 // Render loop is driven by network and input. Also tick at 30 Hz to refresh HUD/anim
 // even if traffic is quiet.
