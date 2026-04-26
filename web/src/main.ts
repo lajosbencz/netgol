@@ -9,6 +9,7 @@ import { Selection } from './selection';
 import { StampUi } from './stamp_ui';
 import { StampState } from './stamp_state';
 import { InfoUi } from './info_ui';
+import { applyUrlToCamera, UrlSync } from './url_sync';
 
 const styles = getComputedStyle(document.documentElement);
 const cssVar = (name: string, fallback: string) =>
@@ -31,6 +32,8 @@ const stampsEl = document.getElementById('stamps') as HTMLElement;
 const infoEl = document.getElementById('info') as HTMLElement;
 
 const cam: Camera = { x: 0, y: 0, zoom: 3 };
+applyUrlToCamera(cam);
+const urlSync = new UrlSync(cam);
 // 512 chunks is ~8 MB of OffscreenCanvas backing memory at 64x64 - comfortably above
 // any reasonable viewport+halo (a 32x32 chunk grid at extreme zoom is the cap), so the
 // LRU only kicks in after sustained panning across distinct world regions.
@@ -72,6 +75,7 @@ function frame() {
   const hover = controls.hoverCell();
   const ghost = stamp && hover ? { stamp, x: hover.x, y: hover.y } : null;
   renderer.render(cam, cache, selection, ghost);
+  urlSync.tick();
   hud.set({
     conn: connState(),
     liveChunks,
@@ -91,6 +95,14 @@ function handleResize() {
 }
 window.addEventListener('resize', handleResize);
 handleResize();
+
+window.addEventListener('hashchange', () => {
+  if (applyUrlToCamera(cam)) {
+    urlSync.noteExternalWrite();
+    subscription.flush();
+    scheduleFrame();
+  }
+});
 
 const wsUrl = (() => {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
