@@ -34,10 +34,6 @@ pub struct JoinAccepted {
 struct Peer {
     tx: Outbound,
     subscribed: HashSet<ChunkCoord>,
-    /// Number of consecutive sim ticks during which this peer's outbound queue
-    /// has been observed non-empty. Reset to 0 each tick where the queue is
-    /// fully drained. Exceeding `config.client_max_lag_ticks` drops the peer.
-    lag_ticks: u32,
 }
 
 struct MirrorEntry {
@@ -125,7 +121,6 @@ impl Hub {
                 self.peers.insert(peer_id, Peer {
                     tx,
                     subscribed: HashSet::new(),
-                    lag_ticks: 0,
                 });
                 let hello = ServerMsg::Hello {
                     tick: self.latest_tick,
@@ -298,12 +293,6 @@ impl Hub {
             }
         }
 
-        // Per-peer lag policy: drop peers whose outbound has stayed backed up
-        // for more than `client_max_lag_ticks` consecutive ticks.
-        if !ev.initial {
-            self.tick_lag_check();
-        }
-
         // Sliding-window rate/util counters only advance on true ticks.
         if !ev.initial {
             self.compute_in_window += ev.compute_duration;
@@ -338,30 +327,6 @@ impl Hub {
         }
     }
 
-    fn tick_lag_check(&mut self) {
-        let cap = self.config.peer_outbound_capacity;
-        let max_lag = self.config.client_max_lag_ticks;
-        let mut to_drop: Vec<PeerId> = Vec::new();
-        for (&pid, peer) in &mut self.peers {
-            if peer.tx.capacity() == cap {
-                peer.lag_ticks = 0;
-            } else {
-                peer.lag_ticks = peer.lag_ticks.saturating_add(1);
-                if peer.lag_ticks > max_lag {
-                    to_drop.push(pid);
-                }
-            }
-        }
-        for pid in to_drop {
-            tracing::warn!(
-                peer = pid,
-                max_lag,
-                "dropping peer: outbound queue backed up beyond client_max_lag_ticks"
-            );
-            self.drop_peer(pid);
-        }
-    }
-
     fn broadcast(&mut self, msg: &ServerMsg) {
         let bytes = encode_once(msg);
         let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
@@ -381,6 +346,11 @@ impl Hub {
             None => return false,
         };
         if drop {
+            tracing::warn!(
+                peer = peer_id,
+                cap = self.config.peer_outbound_capacity,
+                "dropping peer: outbound queue full (backpressure)"
+            );
             self.drop_peer(peer_id);
             false
         } else {

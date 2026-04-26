@@ -16,14 +16,9 @@ pub struct Config {
     /// via the `CLIENT_MAX_CHUNKS` env var; defaults to the wire u16 limit.
     #[serde(default = "default_client_max_chunks")]
     pub client_max_chunks: u32,
-    /// Drop a peer whose outbound queue has been backed up for more than this
-    /// many sim ticks. Default 50 = ~5 s at 10 Hz tick rate.
-    #[serde(default = "default_client_max_lag_ticks")]
-    pub client_max_lag_ticks: u32,
 }
 
 fn default_client_max_chunks() -> u32 { 65535 }
-fn default_client_max_lag_ticks() -> u32 { 50 }
 
 impl Config {
     pub fn load(path: &Path) -> Self {
