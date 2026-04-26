@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
 # Build stage: musl-cross compile so the final binary has zero runtime libc deps.
-# Layer-cache deps with the standard manifest+stub trick.
 FROM rust:1-slim-bookworm AS builder
 
 WORKDIR /build
@@ -16,30 +15,17 @@ ARG FEATURES=avx2
 ARG RUSTFLAGS="-C target-cpu=x86-64-v3"
 ENV RUSTFLAGS=$RUSTFLAGS
 
-# Copy rust-toolchain.toml first so rustup picks the right channel before we
-# install the musl target onto it.
-COPY rust-toolchain.toml ./
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 RUN rustup target add $TARGET
+COPY simulation simulation
+COPY protocol   protocol
+COPY server     server
 
-# Pre-cache dependency compilation.
-COPY Cargo.toml Cargo.lock ./
-COPY simulation/Cargo.toml simulation/Cargo.toml
-COPY protocol/Cargo.toml   protocol/Cargo.toml
-COPY server/Cargo.toml     server/Cargo.toml
-RUN mkdir -p simulation/src protocol/src server/src \
- && echo "fn main() {}" > server/src/main.rs \
- && echo ""             > simulation/src/lib.rs \
- && echo ""             > protocol/src/lib.rs \
- && cargo build --release --target $TARGET ${FEATURES:+--features $FEATURES} -p server
-
-# Real build. The COPY commands replace the stub source files with the real
-# ones; cargo's fingerprinting detects the content change and rebuilds the
-# workspace crates while reusing third-party deps from cache.
-COPY simulation/src simulation/src
-COPY protocol/src   protocol/src
-COPY server/src     server/src
-RUN cargo clean --release --target $TARGET -p simulation -p protocol -p server \
- && cargo build --release --target $TARGET ${FEATURES:+--features $FEATURES} -p server \
+# Cache mounts hold the cargo registry and the target dir across builds; copy
+# the binary out before the RUN ends since the mounts unmount after.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=lazos-registry \
+    --mount=type=cache,target=/build/target,id=lazos-target-${TARGET} \
+    cargo build --release --target $TARGET ${FEATURES:+--features $FEATURES} -p server \
  && strip target/$TARGET/release/lazos-server \
  && cp target/$TARGET/release/lazos-server /lazos-server
 
