@@ -1,6 +1,7 @@
 //! `CHUNK_SIZE x CHUNK_SIZE` packed-bitset chunk + bit-parallel step.
 
 use crate::CHUNK_SIZE;
+use std::sync::Arc;
 
 const LAST_BIT: usize = CHUNK_SIZE - 1;
 const ROW_MASK: u64 = if CHUNK_SIZE == 64 {
@@ -13,7 +14,7 @@ const ROW_MASK: u64 = if CHUNK_SIZE == 64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
     pub rows: [u64; CHUNK_SIZE],
-    pub frozen: Option<Box<FrozenMask>>,
+    pub frozen: Option<Arc<FrozenMask>>,
 }
 
 impl Default for Chunk {
@@ -66,7 +67,8 @@ impl Chunk {
     pub fn freeze(&mut self, x: usize, y: usize, alive: bool) {
         assert!(x < CHUNK_SIZE && y < CHUNK_SIZE);
         let bit = 1u64 << x;
-        let mask = self.frozen.get_or_insert_with(|| Box::new(FrozenMask::empty()));
+        let arc = self.frozen.get_or_insert_with(|| Arc::new(FrozenMask::empty()));
+        let mask = Arc::make_mut(arc);
         mask.mask[y] |= bit;
         if alive {
             mask.value[y] |= bit;
@@ -83,7 +85,8 @@ impl Chunk {
 
     pub fn unfreeze(&mut self, x: usize, y: usize) {
         assert!(x < CHUNK_SIZE && y < CHUNK_SIZE);
-        if let Some(mask) = self.frozen.as_mut() {
+        if let Some(arc) = self.frozen.as_mut() {
+            let mask = Arc::make_mut(arc);
             let bit = !(1u64 << x);
             mask.mask[y] &= bit;
             mask.value[y] &= bit;

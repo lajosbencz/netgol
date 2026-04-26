@@ -40,7 +40,17 @@ async fn handle(socket: WebSocket, hub_tx: mpsc::Sender<HubCmd>) {
             msg = outbound.recv() => {
                 match msg {
                     Some(bytes) => {
-                        if sink.send(Message::Binary(bytes)).await.is_err() {
+                        if sink.feed(Message::Binary(bytes)).await.is_err() {
+                            break;
+                        }
+                        let mut sink_err = false;
+                        while let Ok(b) = outbound.try_recv() {
+                            if sink.feed(Message::Binary(b)).await.is_err() {
+                                sink_err = true;
+                                break;
+                            }
+                        }
+                        if sink_err || sink.flush().await.is_err() {
                             break;
                         }
                     }

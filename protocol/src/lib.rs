@@ -4,6 +4,7 @@
 //! [`BITS_BYTES`]. All decode errors collapse to a single [`DecodeError`] - fail early.
 
 use simulation::CHUNK_SIZE;
+use std::sync::Arc;
 
 pub const BITS_BYTES: usize = CHUNK_SIZE * 8;
 
@@ -42,7 +43,7 @@ pub enum ServerMsg {
     Hello { tick: u64, chunk_size: u8 },
     /// World region table. Sent once after `Hello` and again whenever it changes.
     /// The client materializes per-chunk flag masks from this list for rendering.
-    Regions { regions: Vec<Region> },
+    Regions { regions: Arc<[Region]> },
     ChunkState { cx: i32, cy: i32, tick: u64, bits: [u8; BITS_BYTES] },
     ChunkDelta { cx: i32, cy: i32, tick: u64, bits: [u8; BITS_BYTES] },
     Reaped { cx: i32, cy: i32 },
@@ -111,7 +112,7 @@ pub fn encode_server(msg: &ServerMsg, out: &mut Vec<u8>) {
             out.push(TAG_REGIONS);
             let n = u16::try_from(regions.len()).expect("region count >= 65536");
             out.extend_from_slice(&n.to_le_bytes());
-            for r in regions {
+            for r in regions.iter() {
                 out.extend_from_slice(&r.x.to_le_bytes());
                 out.extend_from_slice(&r.y.to_le_bytes());
                 out.extend_from_slice(&r.w.to_le_bytes());
@@ -164,7 +165,7 @@ pub fn decode_server(buf: &[u8]) -> Result<ServerMsg, DecodeError> {
                     owner: r.u32()?,
                 });
             }
-            Ok(ServerMsg::Regions { regions })
+            Ok(ServerMsg::Regions { regions: Arc::from(regions) })
         }
         TAG_REAPED => Ok(ServerMsg::Reaped { cx: r.i32()?, cy: r.i32()? }),
         TAG_STATS => Ok(ServerMsg::Stats {
@@ -347,10 +348,10 @@ mod tests {
             ServerMsg::Hello { tick: 7, chunk_size: CHUNK_SIZE as u8 },
             ServerMsg::ChunkState { cx: -5, cy: 12, tick: 99, bits },
             ServerMsg::ChunkDelta { cx: i32::MIN, cy: i32::MAX, tick: u64::MAX, bits },
-            ServerMsg::Regions { regions: vec![
+            ServerMsg::Regions { regions: Arc::from(vec![
                 Region { x: -100, y: -50, w: 200, h: 100, flags: FLAG_FROZEN | FLAG_LOCKED, owner: 0 },
                 Region { x: 0, y: 0, w: 32, h: 32, flags: FLAG_OWNED, owner: 42 },
-            ] },
+            ]) },
             ServerMsg::Reaped { cx: 0, cy: -1 },
             ServerMsg::Stats { tick: 42, live_chunks: 1234, tick_rate_hz: 9.994, tick_utilization: 0.087 },
         ];

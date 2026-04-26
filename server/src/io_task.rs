@@ -58,12 +58,13 @@ async fn run(
     let mut wal = open_wal_for_append(&wal_path, chunk_size)
         .await
         .unwrap_or_else(|e| panic!("open wal {}: {e}", wal_path.display()));
+    let mut wal_scratch: Vec<u8> = Vec::with_capacity(256);
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
             IoCmd::AppendEdits { tick, cells } => {
                 let t = Instant::now();
-                append_edits(&mut wal, tick, &cells)
+                append_edits(&mut wal, tick, &cells, &mut wal_scratch)
                     .await
                     .unwrap_or_else(|e| panic!("wal append: {e}"));
                 metrics.wal_fsync_seconds.observe(t.elapsed().as_secs_f64());
@@ -128,10 +129,11 @@ async fn verify_wal_header(path: &Path, chunk_size: u8) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn append_edits(f: &mut File, tick: u64, cells: &[EditCell]) -> std::io::Result<()> {
+async fn append_edits(f: &mut File, tick: u64, cells: &[EditCell], buf: &mut Vec<u8>) -> std::io::Result<()> {
     let n = u32::try_from(cells.len()).expect("edit batch > u32::MAX cells");
     // One contiguous write keeps the per-record cost a single syscall + fsync.
-    let mut buf: Vec<u8> = Vec::with_capacity(8 + 4 + cells.len() * 11);
+    buf.clear();
+    buf.reserve(8 + 4 + cells.len() * 11);
     buf.extend_from_slice(&tick.to_le_bytes());
     buf.extend_from_slice(&n.to_le_bytes());
     for c in cells {
@@ -141,7 +143,7 @@ async fn append_edits(f: &mut File, tick: u64, cells: &[EditCell]) -> std::io::R
         buf.push(c.ly);
         buf.push(u8::from(c.alive));
     }
-    f.write_all(&buf).await?;
+    f.write_all(buf).await?;
     f.sync_all().await?;
     Ok(())
 }

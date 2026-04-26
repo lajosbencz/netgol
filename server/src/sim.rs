@@ -8,7 +8,7 @@
 use crate::config::Config;
 use crate::io_task::IoCmd;
 use protocol::{rows_to_bits, EditCell, BITS_BYTES};
-use simulation::{ChunkCoord, World, CHUNK_SIZE_I64};
+use simulation::{ChunkCoord, TickOutcome, World, CHUNK_SIZE_I64};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -70,15 +70,15 @@ async fn run(
     // Initial dump so the hub can populate its mirror with all currently-loaded chunks
     // (boot snapshot + frozen regions).
     {
-        let snaps = world
-            .iter_chunks()
-            .map(|(coord, chunk)| ChunkSnap {
+        let mut snaps: Vec<ChunkSnap> = Vec::with_capacity(world.len());
+        for (coord, chunk) in world.iter_chunks() {
+            snaps.push(ChunkSnap {
                 coord,
                 bits: rows_to_bits(&chunk.rows),
                 frozen_mask: chunk.frozen.as_ref().map(|m| rows_to_bits(&m.mask)),
                 live_count: chunk.live_count(),
-            })
-            .collect();
+            });
+        }
         event_tx
             .send(SimEvent {
                 tick: world.tick_number(),
@@ -97,6 +97,8 @@ async fn run(
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let mut edit_touched: HashSet<ChunkCoord> = HashSet::new();
+    let mut outcome = TickOutcome::default();
+    let mut dedup_scratch: HashSet<ChunkCoord> = HashSet::new();
 
     loop {
         tokio::select! {
@@ -122,7 +124,8 @@ async fn run(
                         // Push immediate event so still-life edits surface on the
                         // client without waiting for the next tick.
                         if !edit_touched.is_empty() {
-                            let snaps = collect(&world, edit_touched.drain());
+                            let hint = edit_touched.len();
+                            let snaps = collect(&world, edit_touched.drain(), hint);
                             event_tx
                                 .send(SimEvent {
                                     tick: now_tick,
@@ -147,17 +150,26 @@ async fn run(
             }
             _ = ticker.tick() => {
                 let start = Instant::now();
-                let outcome = world.tick();
-                let mut changed_set: HashSet<ChunkCoord> = outcome.changed.into_iter().collect();
-                changed_set.extend(edit_touched.drain());
-                let changed = collect(&world, changed_set.into_iter());
+                world.tick_into(&mut outcome);
+                if !edit_touched.is_empty() {
+                    dedup_scratch.clear();
+                    dedup_scratch.extend(outcome.changed.iter().copied());
+                    for c in edit_touched.drain() {
+                        if dedup_scratch.insert(c) {
+                            outcome.changed.push(c);
+                        }
+                    }
+                }
+                let hint = outcome.changed.len();
+                let changed = collect(&world, outcome.changed.iter().copied(), hint);
+                let removed: Vec<ChunkCoord> = outcome.removed.drain(..).collect();
                 let now = world.tick_number();
 
                 event_tx
                     .send(SimEvent {
                         tick: now,
                         changed,
-                        removed: outcome.removed,
+                        removed,
                         live_count: world.len(),
                         compute_duration: start.elapsed(),
                         initial: false,
@@ -178,8 +190,8 @@ async fn run(
     }
 }
 
-fn collect(world: &World, coords: impl Iterator<Item = ChunkCoord>) -> Vec<ChunkSnap> {
-    let mut out = Vec::new();
+fn collect(world: &World, coords: impl Iterator<Item = ChunkCoord>, hint: usize) -> Vec<ChunkSnap> {
+    let mut out = Vec::with_capacity(hint);
     for coord in coords {
         if let Some(chunk) = world.get_chunk(coord.0, coord.1) {
             out.push(ChunkSnap {

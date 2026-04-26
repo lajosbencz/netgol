@@ -113,7 +113,7 @@ pub fn load(path: &Path) -> std::io::Result<World> {
             let mut v = [0u8; BITS_BYTES];
             r.read_exact(&mut m)?;
             r.read_exact(&mut v)?;
-            Some(Box::new(FrozenMask {
+            Some(std::sync::Arc::new(FrozenMask {
                 mask: bits_to_rows(&m),
                 value: bits_to_rows(&v),
             }))

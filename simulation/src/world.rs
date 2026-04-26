@@ -44,6 +44,7 @@ pub struct World {
     /// Scratch buffers reused across ticks. Cleared (not dropped) at start of `tick`.
     scratch_edges: CoordMap<EdgeBundle>,
     scratch_candidates: CoordSet,
+    scratch_candidates_vec: Vec<ChunkCoord>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -117,36 +118,50 @@ impl World {
     /// the empty-chunk + zero-halo early-out in `Chunk::step`, this keeps the
     /// per-tick work proportional to *active* world activity, not chunk count.
     pub fn tick(&mut self) -> TickOutcome {
+        let mut outcome = TickOutcome::default();
+        self.tick_into(&mut outcome);
+        outcome
+    }
+
+    /// Reusable-buffer variant of [`tick`]. Caller-owned `outcome` is cleared
+    /// at entry; its `Vec` capacities survive across calls.
+    pub fn tick_into(&mut self, outcome: &mut TickOutcome) {
+        outcome.changed.clear();
+        outcome.removed.clear();
         self.scratch_edges.clear();
         self.scratch_candidates.clear();
+        self.scratch_candidates_vec.clear();
 
-        // Cache edges of every live chunk once. Used both to assemble halos and to
-        // determine which neighbors actually need stepping.
         for (&coord, ch) in &self.chunks {
+            if ch.is_empty() {
+                continue;
+            }
             self.scratch_edges.insert(coord, ch.edges());
         }
 
-        for (&(x, y), e) in &self.scratch_edges {
-            self.scratch_candidates.insert((x, y));
-            // Sharp neighbor expansion: each axis test corresponds to exactly the
-            // cells in `self` that can affect the corresponding neighbor's GoL count.
-            if e.top != 0 { self.scratch_candidates.insert((x, y - 1)); }
-            if e.bottom != 0 { self.scratch_candidates.insert((x, y + 1)); }
-            if e.left != 0 { self.scratch_candidates.insert((x - 1, y)); }
-            if e.right != 0 { self.scratch_candidates.insert((x + 1, y)); }
-            if e.corners[0] != 0 { self.scratch_candidates.insert((x - 1, y - 1)); }
-            if e.corners[1] != 0 { self.scratch_candidates.insert((x + 1, y - 1)); }
-            if e.corners[2] != 0 { self.scratch_candidates.insert((x - 1, y + 1)); }
-            if e.corners[3] != 0 { self.scratch_candidates.insert((x + 1, y + 1)); }
+        let edges = &self.scratch_edges;
+        let set = &mut self.scratch_candidates;
+        let vec = &mut self.scratch_candidates_vec;
+        let mut push = |c: ChunkCoord| {
+            if set.insert(c) {
+                vec.push(c);
+            }
+        };
+        for (&(x, y), e) in edges {
+            push((x, y));
+            if e.top != 0 { push((x, y - 1)); }
+            if e.bottom != 0 { push((x, y + 1)); }
+            if e.left != 0 { push((x - 1, y)); }
+            if e.right != 0 { push((x + 1, y)); }
+            if e.corners[0] != 0 { push((x - 1, y - 1)); }
+            if e.corners[1] != 0 { push((x + 1, y - 1)); }
+            if e.corners[2] != 0 { push((x - 1, y + 1)); }
+            if e.corners[3] != 0 { push((x + 1, y + 1)); }
         }
 
         let empty_chunk = Chunk::empty();
-        let mut outcome = TickOutcome::default();
-        // Take the scratch out of `self` so we can iterate it while mutating
-        // `self.chunks` in the loop body. Returned (cleared) at end so its
-        // capacity is reused next tick.
-        let candidates = std::mem::take(&mut self.scratch_candidates);
-        for &coord in &candidates {
+        for i in 0..self.scratch_candidates_vec.len() {
+            let coord = self.scratch_candidates_vec[i];
             let next = {
                 let current = self.chunks.get(&coord).unwrap_or(&empty_chunk);
                 let halo = assemble_halo(coord, &self.scratch_edges);
@@ -160,8 +175,6 @@ impl World {
             }
             match self.chunks.entry(coord) {
                 Entry::Occupied(mut slot) => {
-                    // Compare row bytes only - the frozen mask doesn't change during
-                    // a step so its derive-PartialEq comparison is wasted work.
                     if slot.get().rows != next.rows {
                         slot.insert(next);
                         outcome.changed.push(coord);
@@ -174,12 +187,7 @@ impl World {
             }
         }
 
-        let mut candidates = candidates;
-        candidates.clear();
-        self.scratch_candidates = candidates;
-
         self.tick = self.tick.checked_add(1).expect("tick counter overflow");
-        outcome
     }
 }
 

@@ -68,6 +68,10 @@ pub fn spawn(
         window_started: Instant::now(),
         ticks_in_window: 0,
         compute_in_window: Duration::ZERO,
+        recipients_scratch: Vec::new(),
+        peer_ids_scratch: Vec::new(),
+        reaper_subscribed_scratch: HashSet::new(),
+        reaper_info_scratch: HashMap::new(),
     };
     tokio::spawn(hub.run(rx, sim_event_rx));
     tx
@@ -87,6 +91,10 @@ struct Hub {
     window_started: Instant,
     ticks_in_window: u32,
     compute_in_window: Duration,
+    recipients_scratch: Vec<PeerId>,
+    peer_ids_scratch: Vec<PeerId>,
+    reaper_subscribed_scratch: HashSet<ChunkCoord>,
+    reaper_info_scratch: HashMap<ChunkCoord, ReapInfo>,
 }
 
 impl Hub {
@@ -134,7 +142,7 @@ impl Hub {
                 }
                 // Send the region table right after Hello so the client can
                 // materialise per-chunk flag overlays before any state arrives.
-                let regions_msg = ServerMsg::Regions { regions: self.regions.to_vec() };
+                let regions_msg = ServerMsg::Regions { regions: Arc::clone(&self.regions) };
                 self.send_to(peer_id, &regions_msg);
                 self.metrics.client_sessions.set(self.peers.len() as i64);
             }
@@ -248,17 +256,21 @@ impl Hub {
             // Don't fanout the initial bulk dump - peers receive their slice on subscribe.
             if ev.initial { continue; }
 
-            let recipients: Vec<PeerId> = match self.chunk_subs.get(&snap.coord) {
-                Some(subs) if !subs.is_empty() => subs.iter().copied().collect(),
+            self.recipients_scratch.clear();
+            match self.chunk_subs.get(&snap.coord) {
+                Some(subs) if !subs.is_empty() => {
+                    self.recipients_scratch.extend(subs.iter().copied());
+                }
                 _ => continue,
             };
-            let bytes = encode_once(&ServerMsg::ChunkDelta {
+            let bytes = self.encode_msg(&ServerMsg::ChunkDelta {
                 cx: snap.coord.0,
                 cy: snap.coord.1,
                 tick: now,
                 bits: snap.bits,
             });
-            for pid in recipients {
+            for i in 0..self.recipients_scratch.len() {
+                let pid = self.recipients_scratch[i];
                 if self.send_bytes(pid, bytes.clone()) {
                     self.metrics.chunk_delta_sent_total.inc();
                 }
@@ -267,20 +279,21 @@ impl Hub {
 
         // Reaper. Skip on the initial dump (which has no removed-since-last context).
         if !ev.initial && self.mirror.len() > self.config.max_live_chunks {
-            let mut subscribed_set: HashSet<ChunkCoord> = HashSet::new();
+            self.reaper_subscribed_scratch.clear();
             for peer in self.peers.values() {
-                subscribed_set.extend(peer.subscribed.iter().copied());
+                self.reaper_subscribed_scratch.extend(peer.subscribed.iter().copied());
             }
-            let mut info_map: HashMap<ChunkCoord, ReapInfo> = HashMap::with_capacity(self.mirror.len());
+            self.reaper_info_scratch.clear();
+            self.reaper_info_scratch.reserve(self.mirror.len());
             for (&coord, m) in &self.mirror {
-                info_map.insert(coord, ReapInfo {
+                self.reaper_info_scratch.insert(coord, ReapInfo {
                     live_count: m.live_count,
                     is_frozen: m.frozen_mask.is_some(),
                 });
             }
             let to_reap = reaper::pick_reapable(
-                &info_map,
-                &subscribed_set,
+                &self.reaper_info_scratch,
+                &self.reaper_subscribed_scratch,
                 &self.last_seen_tick,
                 now,
                 self.config.max_live_chunks,
@@ -357,15 +370,22 @@ impl Hub {
     }
 
     fn broadcast(&mut self, msg: &ServerMsg) {
-        let bytes = encode_once(msg);
-        let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
-        for pid in peer_ids {
+        let bytes = self.encode_msg(msg);
+        self.peer_ids_scratch.clear();
+        self.peer_ids_scratch.extend(self.peers.keys().copied());
+        for i in 0..self.peer_ids_scratch.len() {
+            let pid = self.peer_ids_scratch[i];
             self.send_bytes(pid, bytes.clone());
         }
     }
 
     fn send_to(&mut self, peer_id: PeerId, msg: &ServerMsg) -> bool {
-        self.send_bytes(peer_id, encode_once(msg))
+        let bytes = self.encode_msg(msg);
+        self.send_bytes(peer_id, bytes)
+    }
+
+    fn encode_msg(&mut self, msg: &ServerMsg) -> Bytes {
+        encode_once(msg)
     }
 
     fn send_bytes(&mut self, peer_id: PeerId, bytes: Bytes) -> bool {
@@ -406,9 +426,19 @@ impl Hub {
 }
 
 fn encode_once(msg: &ServerMsg) -> Bytes {
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(encode_capacity(msg));
     encode_server(msg, &mut buf);
     Bytes::from(buf)
+}
+
+fn encode_capacity(msg: &ServerMsg) -> usize {
+    match msg {
+        ServerMsg::ChunkState { .. } | ServerMsg::ChunkDelta { .. } => BITS_BYTES + 1 + 4 + 4 + 8,
+        ServerMsg::Hello { .. } => 1 + 8 + 1,
+        ServerMsg::Reaped { .. } => 1 + 4 + 4,
+        ServerMsg::Stats { .. } => 1 + 8 + 4 + 4 + 4,
+        ServerMsg::Regions { regions } => 1 + 2 + regions.len() * (8 + 8 + 4 + 4 + 1 + 4),
+    }
 }
 
 pub async fn join(tx: &mpsc::Sender<HubCmd>) -> Option<JoinAccepted> {
