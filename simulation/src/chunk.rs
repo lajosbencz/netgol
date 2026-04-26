@@ -13,7 +13,7 @@ const ROW_MASK: u64 = if CHUNK_SIZE == 64 {
 /// One row per `u64`; bit `x` of `rows[y]` = cell at `(x, y)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
-    pub rows: [u64; CHUNK_SIZE],
+    rows: [u64; CHUNK_SIZE],
     pub frozen: Option<Arc<FrozenMask>>,
 }
 
@@ -29,6 +29,17 @@ impl Chunk {
             rows: [0u64; CHUNK_SIZE],
             frozen: None,
         }
+    }
+
+    pub fn from_rows_and_frozen(
+        rows: [u64; CHUNK_SIZE],
+        frozen: Option<Arc<FrozenMask>>,
+    ) -> Self {
+        Self { rows, frozen }
+    }
+
+    pub fn rows(&self) -> &[u64; CHUNK_SIZE] {
+        &self.rows
     }
 
     pub fn get(&self, x: usize, y: usize) -> bool {
@@ -125,12 +136,11 @@ impl Chunk {
     /// Bit-parallel half-adder cascade across the 8 shifted neighbor rows. Per column
     /// `next = !s3 & !s2 & s1 & (s0 | alive)` - the standard B3/S23 rule reduced from
     /// the 4-bit neighbor count `(s3 s2 s1 s0)`.
-    pub fn step(&self, halo: &EdgeBundle) -> Self {
-        // Early-out: empty chunk + zero halo => empty result. The bit-parallel
-        // kernel would compute zero-of-everything for ~3000 ops; this is one branch.
-        // Frozen masks are preserved through the clone.
+    pub fn step(&self, halo: &EdgeBundle) -> StepResult {
+        // Empty + zero halo: result is provably identical to input. One branch
+        // instead of ~3000 kernel ops, and no clone.
         if self.is_empty() && halo.is_zero() {
-            return self.clone();
+            return StepResult::Unchanged;
         }
         let row_at = |y: i32| -> u64 {
             if y < 0 {
@@ -200,7 +210,28 @@ impl Chunk {
                 out.rows[y] = (out.rows[y] & !m) | (v & m);
             }
         }
-        out
+        StepResult::Stepped(out)
+    }
+}
+
+/// Outcome of [`Chunk::step`]. `Unchanged` only fires on the empty + zero-halo
+/// early-out so callers can skip insert without paying for a clone.
+// `Stepped` is large by design (inline `[u64; 64]` rows): boxing would add a
+// heap alloc per stepped chunk, defeating the whole point of the Unchanged path.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepResult {
+    Unchanged,
+    Stepped(Chunk),
+}
+
+impl StepResult {
+    #[cfg(test)]
+    fn into_chunk(self, source: &Chunk) -> Chunk {
+        match self {
+            StepResult::Unchanged => source.clone(),
+            StepResult::Stepped(c) => c,
+        }
     }
 }
 
@@ -276,7 +307,7 @@ mod tests {
                 chunk.get(x as usize, y as usize)
             }
         };
-        let mut out = Chunk::empty();
+        let mut rows = [0u64; CHUNK_SIZE];
         for y in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let mut count = 0u8;
@@ -291,16 +322,18 @@ mod tests {
                     }
                 }
                 let alive = chunk.get(x, y);
-                out.set(x, y, matches!((alive, count), (true, 2 | 3) | (false, 3)));
+                if matches!((alive, count), (true, 2 | 3) | (false, 3)) {
+                    rows[y] |= 1u64 << x;
+                }
             }
         }
-        out.frozen = chunk.frozen.clone();
-        if let Some(m) = out.frozen.as_ref() {
+        let frozen = chunk.frozen.clone();
+        if let Some(m) = frozen.as_ref() {
             for y in 0..CHUNK_SIZE {
-                out.rows[y] = (out.rows[y] & !m.mask[y]) | (m.value[y] & m.mask[y]);
+                rows[y] = (rows[y] & !m.mask[y]) | (m.value[y] & m.mask[y]);
             }
         }
-        out
+        Chunk::from_rows_and_frozen(rows, frozen)
     }
 
     struct Xs(u64);
@@ -319,10 +352,11 @@ mod tests {
     fn bit_parallel_matches_reference_random() {
         let mut rng = Xs(0x00de_adbe_efc0_ffee);
         for _ in 0..64 {
-            let mut chunk = Chunk::empty();
-            for y in 0..CHUNK_SIZE {
-                chunk.rows[y] = rng.next() & ROW_MASK;
+            let mut rows = [0u64; CHUNK_SIZE];
+            for r in &mut rows {
+                *r = rng.next() & ROW_MASK;
             }
+            let chunk = Chunk::from_rows_and_frozen(rows, None);
             let halo = EdgeBundle {
                 top: rng.next() & ROW_MASK,
                 bottom: rng.next() & ROW_MASK,
@@ -335,7 +369,8 @@ mod tests {
                     (rng.next() & 1) as u8,
                 ],
             };
-            assert_eq!(chunk.step(&halo), reference_step(&chunk, &halo));
+            let actual = chunk.step(&halo).into_chunk(&chunk);
+            assert_eq!(actual, reference_step(&chunk, &halo));
         }
     }
 
@@ -346,10 +381,10 @@ mod tests {
         c.set(2, 1, true);
         c.set(3, 1, true);
         let halo = EdgeBundle::empty();
-        let next = c.step(&halo);
+        let next = c.step(&halo).into_chunk(&c);
         assert!(next.get(2, 0) && next.get(2, 1) && next.get(2, 2));
         assert_eq!(next.live_count(), 3);
-        assert_eq!(next.step(&halo), c);
+        assert_eq!(next.step(&halo).into_chunk(&next), c);
     }
 
     #[test]
@@ -359,20 +394,22 @@ mod tests {
         c.set(2, 1, true);
         c.set(1, 2, true);
         c.set(2, 2, true);
-        assert_eq!(c.step(&EdgeBundle::empty()), c);
+        assert_eq!(c.step(&EdgeBundle::empty()).into_chunk(&c), c);
     }
 
     #[test]
     fn empty_stays_empty() {
-        assert!(Chunk::empty().step(&EdgeBundle::empty()).is_empty());
+        assert_eq!(
+            Chunk::empty().step(&EdgeBundle::empty()),
+            StepResult::Unchanged
+        );
     }
 
     #[test]
     fn frozen_cells_persist() {
         let mut c = Chunk::empty();
         c.freeze(5, 5, true);
-        // No live neighbors; without freeze, (5,5) would die. With freeze, it survives.
-        let next = c.step(&EdgeBundle::empty());
+        let next = c.step(&EdgeBundle::empty()).into_chunk(&c);
         assert!(next.get(5, 5));
         assert!(next.is_frozen());
     }

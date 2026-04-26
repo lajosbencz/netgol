@@ -1,7 +1,7 @@
 //! Sparse chunk-indexed world. Stepping grows into neighbor chunks as edges birth cells,
 //! and drops chunks that go fully empty unless they're frozen.
 
-use crate::chunk::{Chunk, EdgeBundle};
+use crate::chunk::{Chunk, EdgeBundle, StepResult};
 use crate::{CHUNK_SIZE, CHUNK_SIZE_I64};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -41,7 +41,8 @@ type CoordSet = HashSet<ChunkCoord, BuildHasherDefault<CoordHasher>>;
 pub struct World {
     chunks: CoordMap<Chunk>,
     tick: u64,
-    /// Scratch buffers reused across ticks. Cleared (not dropped) at start of `tick`.
+    /// Start-of-tick snapshot: halo assembly must not see mid-tick mutations
+    /// from earlier candidates in the loop. Cleared (capacity retained) per tick.
     scratch_edges: CoordMap<EdgeBundle>,
     scratch_candidates: CoordSet,
     scratch_candidates_vec: Vec<ChunkCoord>,
@@ -162,10 +163,14 @@ impl World {
         let empty_chunk = Chunk::empty();
         for i in 0..self.scratch_candidates_vec.len() {
             let coord = self.scratch_candidates_vec[i];
-            let next = {
+            let result = {
                 let current = self.chunks.get(&coord).unwrap_or(&empty_chunk);
                 let halo = assemble_halo(coord, &self.scratch_edges);
                 current.step(&halo)
+            };
+            let next = match result {
+                StepResult::Unchanged => continue,
+                StepResult::Stepped(c) => c,
             };
             if next.is_empty() && !next.is_frozen() {
                 if self.chunks.remove(&coord).is_some() {
@@ -175,7 +180,7 @@ impl World {
             }
             match self.chunks.entry(coord) {
                 Entry::Occupied(mut slot) => {
-                    if slot.get().rows != next.rows {
+                    if slot.get().rows() != next.rows() {
                         slot.insert(next);
                         outcome.changed.push(coord);
                     }

@@ -14,5 +14,5 @@ mod world;
 #[cfg(feature = "wasm")]
 mod wasm;
 
-pub use chunk::{Chunk, EdgeBundle, FrozenMask};
+pub use chunk::{Chunk, EdgeBundle, FrozenMask, StepResult};
 pub use world::{ChunkCoord, TickOutcome, World};

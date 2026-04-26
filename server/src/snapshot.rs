@@ -33,7 +33,7 @@ pub fn serialize(world: &World) -> Vec<u8> {
     for ((cx, cy), chunk) in entries {
         buf.extend_from_slice(&cx.to_le_bytes());
         buf.extend_from_slice(&cy.to_le_bytes());
-        let bits = rows_to_bits(&chunk.rows);
+        let bits = rows_to_bits(chunk.rows());
         match &chunk.frozen {
             None => {
                 buf.push(0);
@@ -118,7 +118,7 @@ pub fn load(path: &Path) -> std::io::Result<World> {
                 value: bits_to_rows(&v),
             }))
         };
-        world.insert_chunk((cx, cy), Chunk { rows, frozen });
+        world.insert_chunk((cx, cy), Chunk::from_rows_and_frozen(rows, frozen));
     }
     Ok(world)
 }
@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(loaded.len(), w.len());
         for ((c, ch), (c2, ch2)) in w.iter_chunks().zip(loaded.iter_chunks()) {
             assert_eq!(c, c2);
-            assert_eq!(ch.rows, ch2.rows);
+            assert_eq!(ch.rows(), ch2.rows());
             assert_eq!(ch.frozen.is_some(), ch2.frozen.is_some());
         }
         let _ = std::fs::remove_file(&path);

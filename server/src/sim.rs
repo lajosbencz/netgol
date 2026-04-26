@@ -24,7 +24,9 @@ pub enum SimCmd {
 pub struct ChunkSnap {
     pub coord: ChunkCoord,
     pub bits: [u8; BITS_BYTES],
-    pub frozen_mask: Option<[u8; BITS_BYTES]>,
+    /// Boxed because frozen chunks are rare; keeps the unfrozen `ChunkSnap`
+    /// from carrying a 256-byte inline `Option` payload across the channel.
+    pub frozen_mask: Option<Box<[u8; BITS_BYTES]>>,
     pub live_count: u32,
 }
 
@@ -74,8 +76,8 @@ async fn run(
         for (coord, chunk) in world.iter_chunks() {
             snaps.push(ChunkSnap {
                 coord,
-                bits: rows_to_bits(&chunk.rows),
-                frozen_mask: chunk.frozen.as_ref().map(|m| rows_to_bits(&m.mask)),
+                bits: rows_to_bits(chunk.rows()),
+                frozen_mask: chunk.frozen.as_ref().map(|m| Box::new(rows_to_bits(&m.mask))),
                 live_count: chunk.live_count(),
             });
         }
@@ -196,8 +198,8 @@ fn collect(world: &World, coords: impl Iterator<Item = ChunkCoord>, hint: usize)
         if let Some(chunk) = world.get_chunk(coord.0, coord.1) {
             out.push(ChunkSnap {
                 coord,
-                bits: rows_to_bits(&chunk.rows),
-                frozen_mask: chunk.frozen.as_ref().map(|m| rows_to_bits(&m.mask)),
+                bits: rows_to_bits(chunk.rows()),
+                frozen_mask: chunk.frozen.as_ref().map(|m| Box::new(rows_to_bits(&m.mask))),
                 live_count: chunk.live_count(),
             });
         }

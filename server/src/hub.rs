@@ -41,7 +41,8 @@ struct MirrorEntry {
     bits: [u8; BITS_BYTES],
     /// Cached frozen mask for the chunk (1 bit/cell). Built from regions; used
     /// for `is_frozen` reaper input. None if no frozen region intersects.
-    frozen_mask: Option<[u8; BITS_BYTES]>,
+    /// Boxed because most chunks are unfrozen; saves 256 B per mirror entry.
+    frozen_mask: Option<Box<[u8; BITS_BYTES]>>,
     live_count: u32,
     tick: u64,
 }
@@ -245,29 +246,32 @@ impl Hub {
             self.broadcast(&ServerMsg::Reaped { cx: coord.0, cy: coord.1 });
         }
 
-        for snap in &ev.changed {
-            self.mirror.insert(snap.coord, MirrorEntry {
-                bits: snap.bits,
+        let initial = ev.initial;
+        for snap in ev.changed {
+            let coord = snap.coord;
+            let bits = snap.bits;
+            self.mirror.insert(coord, MirrorEntry {
+                bits,
                 frozen_mask: snap.frozen_mask,
                 live_count: snap.live_count,
                 tick: now,
             });
 
             // Don't fanout the initial bulk dump - peers receive their slice on subscribe.
-            if ev.initial { continue; }
+            if initial { continue; }
 
             self.recipients_scratch.clear();
-            match self.chunk_subs.get(&snap.coord) {
+            match self.chunk_subs.get(&coord) {
                 Some(subs) if !subs.is_empty() => {
                     self.recipients_scratch.extend(subs.iter().copied());
                 }
                 _ => continue,
             };
             let bytes = self.encode_msg(&ServerMsg::ChunkDelta {
-                cx: snap.coord.0,
-                cy: snap.coord.1,
+                cx: coord.0,
+                cy: coord.1,
                 tick: now,
-                bits: snap.bits,
+                bits,
             });
             for i in 0..self.recipients_scratch.len() {
                 let pid = self.recipients_scratch[i];
