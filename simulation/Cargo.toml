@@ -16,3 +16,10 @@ wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
 wasm-bindgen = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "tick"
+harness = false
