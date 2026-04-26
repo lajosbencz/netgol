@@ -3,6 +3,9 @@
 use crate::CHUNK_SIZE;
 use std::sync::Arc;
 
+#[cfg(all(feature = "avx2", not(target_arch = "x86_64")))]
+compile_error!("feature `avx2` requires target_arch = \"x86_64\"");
+
 const LAST_BIT: usize = CHUNK_SIZE - 1;
 const ROW_MASK: u64 = if CHUNK_SIZE == 64 {
     u64::MAX
@@ -142,62 +145,12 @@ impl Chunk {
         if self.is_empty() && halo.is_zero() {
             return StepResult::Unchanged;
         }
-        let row_at = |y: i32| -> u64 {
-            if y < 0 {
-                halo.top
-            } else if y as usize >= CHUNK_SIZE {
-                halo.bottom
-            } else {
-                self.rows[y as usize]
-            }
-        };
-        let left_bit = |y: i32| -> u64 {
-            if y < 0 {
-                u64::from(halo.corners[0] & 1)
-            } else if y as usize >= CHUNK_SIZE {
-                u64::from(halo.corners[2] & 1)
-            } else {
-                (halo.left >> y) & 1
-            }
-        };
-        let right_bit = |y: i32| -> u64 {
-            if y < 0 {
-                u64::from(halo.corners[1] & 1)
-            } else if y as usize >= CHUNK_SIZE {
-                u64::from(halo.corners[3] & 1)
-            } else {
-                (halo.right >> y) & 1
-            }
-        };
-
         let mut out_rows = [0u64; CHUNK_SIZE];
-        for y in 0..CHUNK_SIZE {
-            let yi = y as i32;
-            let mid = self.rows[y];
-            let top = row_at(yi - 1);
-            let bot = row_at(yi + 1);
-
-            let top_l = (top << 1) | left_bit(yi - 1);
-            let top_r = (top >> 1) | (right_bit(yi - 1) << LAST_BIT);
-            let mid_l = (mid << 1) | left_bit(yi);
-            let mid_r = (mid >> 1) | (right_bit(yi) << LAST_BIT);
-            let bot_l = (bot << 1) | left_bit(yi + 1);
-            let bot_r = (bot >> 1) | (right_bit(yi + 1) << LAST_BIT);
-
-            let neighbors = [top_l, top, top_r, mid_l, mid_r, bot_l, bot, bot_r];
-
-            let (mut s0, mut s1, mut s2, mut s3) = (0u64, 0u64, 0u64, 0u64);
-            for n in neighbors {
-                let c0 = s0 & n;
-                s0 ^= n;
-                let c1 = s1 & c0;
-                s1 ^= c0;
-                let c2 = s2 & c1;
-                s2 ^= c1;
-                s3 |= c2;
-            }
-            out_rows[y] = (!s3 & !s2 & s1 & (s0 | mid)) & ROW_MASK;
-        }
+        #[cfg(feature = "avx2")]
+        // SAFETY: `avx2` feature is a build-time promise of AVX2 support.
+        unsafe { kernel_avx2(&self.rows, halo, &mut out_rows) };
+        #[cfg(not(feature = "avx2"))]
+        kernel_scalar(&self.rows, halo, &mut out_rows);
 
         let mut out = Chunk {
             rows: out_rows,
@@ -211,6 +164,142 @@ impl Chunk {
             }
         }
         StepResult::Stepped(out)
+    }
+}
+
+#[cfg_attr(feature = "avx2", allow(dead_code))]
+fn kernel_scalar(rows: &[u64; CHUNK_SIZE], halo: &EdgeBundle, out_rows: &mut [u64; CHUNK_SIZE]) {
+    let row_at = |y: i32| -> u64 {
+        if y < 0 {
+            halo.top
+        } else if y as usize >= CHUNK_SIZE {
+            halo.bottom
+        } else {
+            rows[y as usize]
+        }
+    };
+    let left_bit = |y: i32| -> u64 {
+        if y < 0 {
+            u64::from(halo.corners[0] & 1)
+        } else if y as usize >= CHUNK_SIZE {
+            u64::from(halo.corners[2] & 1)
+        } else {
+            (halo.left >> y) & 1
+        }
+    };
+    let right_bit = |y: i32| -> u64 {
+        if y < 0 {
+            u64::from(halo.corners[1] & 1)
+        } else if y as usize >= CHUNK_SIZE {
+            u64::from(halo.corners[3] & 1)
+        } else {
+            (halo.right >> y) & 1
+        }
+    };
+
+    for y in 0..CHUNK_SIZE {
+        let yi = y as i32;
+        let mid = rows[y];
+        let top = row_at(yi - 1);
+        let bot = row_at(yi + 1);
+
+        let top_l = (top << 1) | left_bit(yi - 1);
+        let top_r = (top >> 1) | (right_bit(yi - 1) << LAST_BIT);
+        let mid_l = (mid << 1) | left_bit(yi);
+        let mid_r = (mid >> 1) | (right_bit(yi) << LAST_BIT);
+        let bot_l = (bot << 1) | left_bit(yi + 1);
+        let bot_r = (bot >> 1) | (right_bit(yi + 1) << LAST_BIT);
+
+        let neighbors = [top_l, top, top_r, mid_l, mid_r, bot_l, bot, bot_r];
+
+        let (mut s0, mut s1, mut s2, mut s3) = (0u64, 0u64, 0u64, 0u64);
+        for n in neighbors {
+            let c0 = s0 & n;
+            s0 ^= n;
+            let c1 = s1 & c0;
+            s1 ^= c0;
+            let c2 = s2 & c1;
+            s2 ^= c1;
+            s3 |= c2;
+        }
+        out_rows[y] = (!s3 & !s2 & s1 & (s0 | mid)) & ROW_MASK;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(any(feature = "avx2", test)), allow(dead_code))]
+#[target_feature(enable = "avx2")]
+unsafe fn kernel_avx2(
+    rows: &[u64; CHUNK_SIZE],
+    halo: &EdgeBundle,
+    out_rows: &mut [u64; CHUNK_SIZE],
+) {
+    use std::arch::x86_64::*;
+
+    // Padded so unaligned 256-bit loads at offsets 0/1/2 cover top/mid/bot rows.
+    let mut row_buf = [0u64; CHUNK_SIZE + 2];
+    row_buf[0] = halo.top;
+    row_buf[1..=CHUNK_SIZE].copy_from_slice(rows);
+    row_buf[CHUNK_SIZE + 1] = halo.bottom;
+
+    let mut left_buf = [0u64; CHUNK_SIZE + 2];
+    let mut right_buf = [0u64; CHUNK_SIZE + 2];
+    left_buf[0] = u64::from(halo.corners[0] & 1);
+    right_buf[0] = u64::from(halo.corners[1] & 1);
+    for y in 0..CHUNK_SIZE {
+        left_buf[y + 1] = (halo.left >> y) & 1;
+        right_buf[y + 1] = (halo.right >> y) & 1;
+    }
+    left_buf[CHUNK_SIZE + 1] = u64::from(halo.corners[2] & 1);
+    right_buf[CHUNK_SIZE + 1] = u64::from(halo.corners[3] & 1);
+
+    let row_ptr = row_buf.as_ptr().cast::<__m256i>();
+    let left_ptr = left_buf.as_ptr().cast::<__m256i>();
+    let right_ptr = right_buf.as_ptr().cast::<__m256i>();
+
+    let mut y = 0usize;
+    while y < CHUNK_SIZE {
+        let top = _mm256_loadu_si256(row_ptr.byte_add(y * 8));
+        let mid = _mm256_loadu_si256(row_ptr.byte_add((y + 1) * 8));
+        let bot = _mm256_loadu_si256(row_ptr.byte_add((y + 2) * 8));
+
+        let l_top = _mm256_loadu_si256(left_ptr.byte_add(y * 8));
+        let l_mid = _mm256_loadu_si256(left_ptr.byte_add((y + 1) * 8));
+        let l_bot = _mm256_loadu_si256(left_ptr.byte_add((y + 2) * 8));
+
+        let r_top = _mm256_slli_epi64(_mm256_loadu_si256(right_ptr.byte_add(y * 8)), LAST_BIT as i32);
+        let r_mid = _mm256_slli_epi64(_mm256_loadu_si256(right_ptr.byte_add((y + 1) * 8)), LAST_BIT as i32);
+        let r_bot = _mm256_slli_epi64(_mm256_loadu_si256(right_ptr.byte_add((y + 2) * 8)), LAST_BIT as i32);
+
+        let top_l = _mm256_or_si256(_mm256_slli_epi64(top, 1), l_top);
+        let top_r = _mm256_or_si256(_mm256_srli_epi64(top, 1), r_top);
+        let mid_l = _mm256_or_si256(_mm256_slli_epi64(mid, 1), l_mid);
+        let mid_r = _mm256_or_si256(_mm256_srli_epi64(mid, 1), r_mid);
+        let bot_l = _mm256_or_si256(_mm256_slli_epi64(bot, 1), l_bot);
+        let bot_r = _mm256_or_si256(_mm256_srli_epi64(bot, 1), r_bot);
+
+        let neighbors = [top_l, top, top_r, mid_l, mid_r, bot_l, bot, bot_r];
+
+        let mut s0 = _mm256_setzero_si256();
+        let mut s1 = _mm256_setzero_si256();
+        let mut s2 = _mm256_setzero_si256();
+        let mut s3 = _mm256_setzero_si256();
+        for n in neighbors {
+            let c0 = _mm256_and_si256(s0, n);
+            s0 = _mm256_xor_si256(s0, n);
+            let c1 = _mm256_and_si256(s1, c0);
+            s1 = _mm256_xor_si256(s1, c0);
+            let c2 = _mm256_and_si256(s2, c1);
+            s2 = _mm256_xor_si256(s2, c1);
+            s3 = _mm256_or_si256(s3, c2);
+        }
+        let s0_or_mid = _mm256_or_si256(s0, mid);
+        let lhs = _mm256_and_si256(s1, s0_or_mid);
+        let next = _mm256_andnot_si256(s3, _mm256_andnot_si256(s2, lhs));
+
+        let out_ptr = out_rows.as_mut_ptr().byte_add(y * 8).cast::<__m256i>();
+        _mm256_storeu_si256(out_ptr, next);
+        y += 4;
     }
 }
 
@@ -403,6 +492,38 @@ mod tests {
             Chunk::empty().step(&EdgeBundle::empty()),
             StepResult::Unchanged
         );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_matches_scalar_random() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut rng = Xs(0x1234_5678_9abc_def0);
+        for _ in 0..64 {
+            let mut rows = [0u64; CHUNK_SIZE];
+            for r in &mut rows {
+                *r = rng.next() & ROW_MASK;
+            }
+            let halo = EdgeBundle {
+                top: rng.next() & ROW_MASK,
+                bottom: rng.next() & ROW_MASK,
+                left: rng.next() & ROW_MASK,
+                right: rng.next() & ROW_MASK,
+                corners: [
+                    (rng.next() & 1) as u8,
+                    (rng.next() & 1) as u8,
+                    (rng.next() & 1) as u8,
+                    (rng.next() & 1) as u8,
+                ],
+            };
+            let mut scalar_out = [0u64; CHUNK_SIZE];
+            let mut avx2_out = [0u64; CHUNK_SIZE];
+            kernel_scalar(&rows, &halo, &mut scalar_out);
+            unsafe { kernel_avx2(&rows, &halo, &mut avx2_out) };
+            assert_eq!(scalar_out, avx2_out);
+        }
     }
 
     #[test]

@@ -13,6 +13,11 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 wasm = ["dep:wasm-bindgen"]
+# Bakes in the AVX2 step kernel: removes the runtime-detect dispatch and the
+# scalar fallback. Combine with RUSTFLAGS="-C target-cpu=native" (or
+# target-feature=+avx2) to let the compiler inline the kernel into `step`.
+# Binary will SIGILL on non-AVX2 CPUs.
+avx2 = []
 
 [dependencies]
 wasm-bindgen = { workspace = true, optional = true }
