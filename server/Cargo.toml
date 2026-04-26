@@ -11,6 +11,10 @@ description = "Authoritative simulation server for lazos.me."
 name = "lazos-server"
 path = "src/main.rs"
 
+[features]
+default = []
+avx2 = ["simulation/avx2"]
+
 [dependencies]
 simulation.workspace = true
 protocol.workspace = true

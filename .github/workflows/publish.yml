@@ -67,7 +67,10 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
-          build-args: ${{ matrix.target && format('TARGET={0}', matrix.target) || '' }}
+          build-args: |
+            ${{ matrix.target && format('TARGET={0}', matrix.target) || '' }}
+            ${{ matrix.image == 'server' && matrix.arch != 'amd64' && 'FEATURES=' || '' }}
+            ${{ matrix.image == 'server' && matrix.arch != 'amd64' && 'RUSTFLAGS=' || '' }}
           outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/netgol-${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }},mode=max

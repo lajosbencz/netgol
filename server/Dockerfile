@@ -10,6 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 ARG TARGET=x86_64-unknown-linux-musl
+# AMD64 default: AVX2 step kernel + x86-64-v3 baseline (Haswell+/Excavator+).
+# ARM64 / non-AVX2 builds must override both ARGs to empty strings.
+ARG FEATURES=avx2
+ARG RUSTFLAGS="-C target-cpu=x86-64-v3"
+ENV RUSTFLAGS=$RUSTFLAGS
 
 # Copy rust-toolchain.toml first so rustup picks the right channel before we
 # install the musl target onto it.
@@ -25,7 +30,7 @@ RUN mkdir -p simulation/src protocol/src server/src \
  && echo "fn main() {}" > server/src/main.rs \
  && echo ""             > simulation/src/lib.rs \
  && echo ""             > protocol/src/lib.rs \
- && cargo build --release --target $TARGET -p server
+ && cargo build --release --target $TARGET ${FEATURES:+--features $FEATURES} -p server
 
 # Real build. The COPY commands replace the stub source files with the real
 # ones; cargo's fingerprinting detects the content change and rebuilds the
@@ -34,7 +39,7 @@ COPY simulation/src simulation/src
 COPY protocol/src   protocol/src
 COPY server/src     server/src
 RUN cargo clean --release --target $TARGET -p simulation -p protocol -p server \
- && cargo build --release --target $TARGET -p server \
+ && cargo build --release --target $TARGET ${FEATURES:+--features $FEATURES} -p server \
  && strip target/$TARGET/release/lazos-server \
  && cp target/$TARGET/release/lazos-server /lazos-server
 
