@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "simulation",
 ]
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "axum",
  "bytes",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "simulation"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "criterion",
  "wasm-bindgen",
