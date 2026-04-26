@@ -6,6 +6,8 @@ Networked Conway's Game of Life. One shared, persistent,
 effectively-infinite world that any number of clients can
 pan, zoom, and edit in real time.
 
+<br clear="left">
+
 ## What's interesting
 
 - **Three detached tokio tasks**:
@@ -17,6 +19,9 @@ pan, zoom, and edit in real time.
 - **Bit-parallel kernel.** Each chunk steps via a half-adder cascade across
   its 8 shifted neighbors; one tick across a packed 64x64 chunk is a handful
   of `u64` ops.
+- **AVX2 step path.** The same cascade in 256-bit lanes, 4 rows per iteration.
+  Cargo feature `avx2` - compile-time switch, no runtime detection. The amd64
+  server image ships with it on.
 - **Edge-aware expansion.** A neighbor chunk is stepped only if the live
   chunk's relevant edge has cells that could birth into it. Work scales with
   *active* cells, not world size.
