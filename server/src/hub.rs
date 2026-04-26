@@ -7,6 +7,7 @@ use crate::metrics::Metrics;
 use crate::reaper::{self, ReapInfo};
 use crate::region;
 use crate::sim::{SimCmd, SimEvent};
+use bytes::Bytes;
 use protocol::{encode_server, ClientMsg, Region, ServerMsg, BITS_BYTES};
 use simulation::{ChunkCoord, CHUNK_SIZE, CHUNK_SIZE_I64};
 use std::collections::{HashMap, HashSet};
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
 pub type PeerId = u64;
-pub type Outbound = mpsc::Sender<Vec<u8>>;
+pub type Outbound = mpsc::Sender<Bytes>;
 
 #[derive(Debug)]
 pub enum HubCmd {
@@ -27,7 +28,7 @@ pub enum HubCmd {
 #[derive(Debug)]
 pub struct JoinAccepted {
     pub peer_id: PeerId,
-    pub outbound: mpsc::Receiver<Vec<u8>>,
+    pub outbound: mpsc::Receiver<Bytes>,
     pub hello: ServerMsg,
 }
 
@@ -254,7 +255,7 @@ impl Hub {
                 bits: snap.bits,
             });
             for pid in recipients {
-                self.send_bytes(pid, &bytes);
+                self.send_bytes(pid, bytes.clone());
             }
         }
 
@@ -331,18 +332,17 @@ impl Hub {
         let bytes = encode_once(msg);
         let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
         for pid in peer_ids {
-            self.send_bytes(pid, &bytes);
+            self.send_bytes(pid, bytes.clone());
         }
     }
 
     fn send_to(&mut self, peer_id: PeerId, msg: &ServerMsg) -> bool {
-        let bytes = encode_once(msg);
-        self.send_bytes(peer_id, &bytes)
+        self.send_bytes(peer_id, encode_once(msg))
     }
 
-    fn send_bytes(&mut self, peer_id: PeerId, bytes: &[u8]) -> bool {
+    fn send_bytes(&mut self, peer_id: PeerId, bytes: Bytes) -> bool {
         let drop = match self.peers.get(&peer_id) {
-            Some(peer) => peer.tx.try_send(bytes.to_vec()).is_err(),
+            Some(peer) => peer.tx.try_send(bytes).is_err(),
             None => return false,
         };
         if drop {
@@ -373,10 +373,10 @@ impl Hub {
     }
 }
 
-fn encode_once(msg: &ServerMsg) -> Vec<u8> {
+fn encode_once(msg: &ServerMsg) -> Bytes {
     let mut buf = Vec::new();
     encode_server(msg, &mut buf);
-    buf
+    Bytes::from(buf)
 }
 
 pub async fn join(tx: &mpsc::Sender<HubCmd>) -> Option<JoinAccepted> {
