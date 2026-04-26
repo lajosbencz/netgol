@@ -1,0 +1,39 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# wasm build output shipped into web/
+web/src/wasm/
+
+# Node / Bun / web
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+.bun/
+bun-*.log
+
+# Generated protocol bindings (checked in, but ignore stray)
+# (intentionally not ignoring web/src/gen/ - those are committed)
+
+# Runtime / data
+data/
+*.log
+*.pid
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Docker
+.docker-cache/

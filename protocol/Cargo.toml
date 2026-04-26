@@ -1,0 +1,11 @@
+[package]
+name = "protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Wire protocol for lazos.me. Hand-written little-endian binary frames."
+
+[dependencies]
+simulation.workspace = true

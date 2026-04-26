@@ -1,0 +1,40 @@
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    pub bind: String,
+    pub metrics_bind: String,
+    pub tick_hz: u32,
+    pub max_live_chunks: usize,
+    pub peer_outbound_capacity: usize,
+    pub snapshot_path: PathBuf,
+    pub snapshot_interval_ticks: u64,
+    pub regions_path: PathBuf,
+    /// Hard cap on a single peer's subscribed chunk set. Bounds per-peer server
+    /// memory (peer.subscribed + chunk_subs reverse index entries). Overridable
+    /// via the `CLIENT_MAX_CHUNKS` env var; defaults to the wire u16 limit.
+    #[serde(default = "default_client_max_chunks")]
+    pub client_max_chunks: u32,
+    /// Drop a peer whose outbound queue has been backed up for more than this
+    /// many sim ticks. Default 50 = ~5 s at 10 Hz tick rate.
+    #[serde(default = "default_client_max_lag_ticks")]
+    pub client_max_lag_ticks: u32,
+}
+
+fn default_client_max_chunks() -> u32 { 65535 }
+fn default_client_max_lag_ticks() -> u32 { 50 }
+
+impl Config {
+    pub fn load(path: &Path) -> Self {
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("read config {}: {e}", path.display()));
+        let mut cfg: Self = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("parse config {}: {e}", path.display()));
+        if let Ok(v) = std::env::var("CLIENT_MAX_CHUNKS") {
+            cfg.client_max_chunks = v.parse()
+                .unwrap_or_else(|e| panic!("CLIENT_MAX_CHUNKS={v:?}: {e}"));
+        }
+        cfg
+    }
+}

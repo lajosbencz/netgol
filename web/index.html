@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>lazos.me</title>
+    <style>
+      :root {
+        --bg: #0a1120;
+        --alive: #8895ad;
+        --frozen-alive: #4979c2;
+        --frozen-dead: #0e182c;
+        --hud: #6e7787;
+        --panel-bg: rgba(24, 33, 53, 0.8);
+        --panel-fg: #b8bdc7;
+        --panel-border: rgba(255, 255, 255, 0.08);
+        --panel-divider: rgba(255, 255, 255, 0.08);
+        --accent: #4a7fb8;
+        --status-ok: #5fc97a;
+        --status-warn: #d9a13b;
+        --status-err: #c95f5f;
+        --status-info: #5fc9c9;
+        --status-stamp: #c95fa8;
+      }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--panel-fg); font: 12px ui-monospace, monospace; overflow: hidden; }
+      #canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; image-rendering: pixelated; }
+
+      .panel {
+        position: fixed;
+        background: var(--panel-bg);
+        color: var(--panel-fg);
+        border: 1px solid var(--panel-border);
+        border-radius: 4px;
+        padding: 6px 10px;
+        user-select: none;
+        min-width: 130px;
+        max-height: calc(100vh - 16px);
+        overflow-y: auto;
+      }
+      .panel > header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        font-size: 11px;
+        color: var(--hud);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .panel.collapsed > .body { display: none; }
+      .panel > .body { margin-top: 6px; line-height: 1.5; }
+
+      #stats { top: 8px; left: 8px; }
+      #stamps { top: 8px; right: 8px; }
+      #info { bottom: 8px; right: 8px; max-width: 260px; }
+
+      .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--hud);
+      }
+      .dot.green { background: var(--status-ok); }
+      .dot.orange { background: var(--status-warn); }
+      .dot.red { background: var(--status-err); }
+      .dot.blue { background: var(--status-info); }
+      .dot.magenta { background: var(--status-stamp); }
+
+      #stats .body span.value { color: var(--panel-fg); }
+      #stats .body div { white-space: pre; }
+
+      #stamps h4 {
+        margin: 6px 0 2px 0;
+        font-size: 10px;
+        color: var(--hud);
+        font-weight: normal;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      #stamps h4:first-child { margin-top: 0; }
+      #stamps button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        background: transparent;
+        color: var(--panel-fg);
+        border: 1px solid transparent;
+        padding: 3px 6px;
+        margin: 1px 0;
+        font: inherit;
+        cursor: pointer;
+        border-radius: 2px;
+      }
+      #stamps button:hover { background: rgba(255, 255, 255, 0.06); }
+      #stamps button.active { background: var(--accent); color: white; }
+
+      #info .body { color: var(--hud); font-size: 11px; line-height: 1.6; }
+
+      #fab {
+        position: fixed;
+        bottom: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 6px;
+        padding: 6px;
+        min-width: 0;
+      }
+      #fab button {
+        background: transparent;
+        color: var(--panel-fg);
+        border: 1px solid var(--panel-border);
+        border-radius: 4px;
+        padding: 8px 16px;
+        font: inherit;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        cursor: pointer;
+      }
+      #fab button:active { background: rgba(255, 255, 255, 0.08); }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="stats" class="panel collapsed"></div>
+    <div id="stamps" class="panel collapsed"></div>
+    <div id="info" class="panel collapsed"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

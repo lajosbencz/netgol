@@ -1,0 +1,18 @@
+[package]
+name = "simulation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Conway's Game of Life engine. Dual-target: native and wasm32."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies]
+wasm-bindgen = { workspace = true, optional = true }

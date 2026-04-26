@@ -1,0 +1,52 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile.dev
+    image: lazos/server:dev
+    working_dir: /app
+    volumes:
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./Cargo.lock:/app/Cargo.lock
+      - ./rust-toolchain.toml:/app/rust-toolchain.toml
+      - ./simulation:/app/simulation
+      - ./protocol:/app/protocol
+      - ./server:/app/server
+      - ./config:/app/config
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-target:/app/target
+      - server-data:/app/data
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      RUST_LOG: info,server=debug
+    networks: [back]
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile.dev
+    image: lazos/web:dev
+    working_dir: /app
+    volumes:
+      - ./web/index.html:/app/index.html
+      - ./web/src:/app/src
+      - ./web/vite.config.ts:/app/vite.config.ts
+      - ./web/tsconfig.json:/app/tsconfig.json
+      - ./web/package.json:/app/package.json
+      - ./web/package-lock.json:/app/package-lock.json
+    environment:
+      VITE_PROXY_TARGET: http://server:8080
+    ports:
+      - "5173:5173"
+    networks: [back]
+    depends_on: [server]
+
+networks:
+  back:
+
+volumes:
+  cargo-registry:
+  cargo-target:
+  server-data:

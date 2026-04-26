@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1.7
+# Dev image: cargo-watch + a registry/target volume mount makes incremental rebuilds fast.
+FROM rust:1-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+ && rm -rf /var/lib/apt/lists/* \
+ && cargo install cargo-watch --locked
+
+WORKDIR /app
+ENV LAZOS_CONFIG=/app/config/server.toml
+ENV RUST_LOG=info
+EXPOSE 8080 9090
+
+# Source is bind-mounted; cargo-watch rebuilds on change.
+CMD ["cargo", "watch", "-q", "-w", "simulation/src", "-w", "protocol/src", "-w", "server/src", "-x", "run -p server"]

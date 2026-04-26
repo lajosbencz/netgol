@@ -1,0 +1,56 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: lazos/server:latest
+    restart: unless-stopped
+    volumes:
+      - server-data:/app/data
+    expose:
+      - "8080"
+      - "9090"
+    networks: [back]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    image: lazos/web:latest
+    restart: unless-stopped
+    depends_on: [server]
+    ports:
+      - "8080:8080"
+    networks: [back]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+  # Optional: expose metrics on the host. Disabled by default; enable with
+  # `docker compose --profile metrics up`.
+  metrics:
+    image: nginx:1.27-alpine
+    profiles: [metrics]
+    depends_on: [server]
+    ports:
+      - "9090:9090"
+    networks: [back]
+    command: >
+      sh -c 'echo "events {} http { server { listen 9090; location /metrics { proxy_pass http://server:9090/metrics; } } }" > /etc/nginx/nginx.conf && nginx -g "daemon off;"'
+
+networks:
+  back:
+
+volumes:
+  server-data:

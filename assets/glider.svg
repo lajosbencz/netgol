@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-20 -20 100 100" width="90" height="90" shape-rendering="crispEdges">
+  <g fill="hsl(190 65% 45%)">
+    <rect x="0"  y="0"  width="20" height="20" opacity="0">
+      <animate attributeName="opacity" values="0;1;0;1" dur="2s" calcMode="discrete" repeatCount="indefinite"/>
+    </rect>
+    <rect x="20" y="0"  width="20" height="20" opacity="1">
+      <animate attributeName="opacity" values="1;0;0;0" dur="2s" calcMode="discrete" repeatCount="indefinite"/>
+    </rect>
+    <rect x="40" y="0"  width="20" height="20" opacity="0">
+      <animate attributeName="opacity" values="0;1;1;0" dur="2s" calcMode="discrete" repeatCount="indefinite"/>
+    </rect>
+    <rect x="0"  y="20" width="20" height="20" opacity="0">
+      <animate attributeName="opacity" values="0;0;1;0" dur="2s" calcMode="discrete" repeatCount="indefinite"/>
+    </rect>
+    <rect x="20" y="20" width="20" height="20" opacity="0">
+      <animate attributeName="opacity" values="0;1;0;1" dur="2s" calcMode="discrete" repeatCount="indefinite"/>
+    </rect>
+    <rect x="40" y="20" width="20" height="20"/>
+    <rect x="0"  y="40" width="20" height="20" opacity="1">
+      <animate attributeName="opacity" values="1;0;1;1" dur="2s" calcMode="discrete" repeatCount="indefinite"/>
+    </rect>
+    <rect x="20" y="40" width="20" height="20"/>
+    <rect x="40" y="40" width="20" height="20" opacity="1">
+      <animate attributeName="opacity" values="1;0;1;0" dur="2s" calcMode="discrete" repeatCount="indefinite"/>
+    </rect>
+  </g>
+</svg>

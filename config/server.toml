@@ -1,0 +1,8 @@
+bind = "0.0.0.0:8080"
+metrics_bind = "0.0.0.0:9090"
+tick_hz = 10
+max_live_chunks = 100_000
+peer_outbound_capacity = 4096
+snapshot_path = "data/world.snap"
+snapshot_interval_ticks = 600
+regions_path = "config/regions.toml"
