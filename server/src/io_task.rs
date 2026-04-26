@@ -10,8 +10,11 @@
 //! them. Channel-full = invariant violation (panic) so I/O backpressure surfaces
 //! immediately rather than as silent data loss.
 
+use crate::metrics::Metrics;
 use protocol::EditCell;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -35,9 +38,9 @@ pub struct IoHandles {
     pub tx: mpsc::Sender<IoCmd>,
 }
 
-pub fn spawn(snapshot_path: PathBuf, chunk_size: u8) -> IoHandles {
+pub fn spawn(snapshot_path: PathBuf, chunk_size: u8, metrics: Arc<Metrics>) -> IoHandles {
     let (tx, rx) = mpsc::channel(IO_CMD_CAPACITY);
-    tokio::spawn(run(snapshot_path, chunk_size, rx));
+    tokio::spawn(run(snapshot_path, chunk_size, rx, metrics));
     IoHandles { tx }
 }
 
@@ -45,7 +48,12 @@ pub fn wal_path(snapshot_path: &Path) -> PathBuf {
     snapshot_path.with_extension("wal")
 }
 
-async fn run(snapshot_path: PathBuf, chunk_size: u8, mut rx: mpsc::Receiver<IoCmd>) {
+async fn run(
+    snapshot_path: PathBuf,
+    chunk_size: u8,
+    mut rx: mpsc::Receiver<IoCmd>,
+    metrics: Arc<Metrics>,
+) {
     let wal_path = wal_path(&snapshot_path);
     let mut wal = open_wal_for_append(&wal_path, chunk_size)
         .await
@@ -54,17 +62,23 @@ async fn run(snapshot_path: PathBuf, chunk_size: u8, mut rx: mpsc::Receiver<IoCm
     while let Some(cmd) = rx.recv().await {
         match cmd {
             IoCmd::AppendEdits { tick, cells } => {
+                let t = Instant::now();
                 append_edits(&mut wal, tick, &cells)
                     .await
                     .unwrap_or_else(|e| panic!("wal append: {e}"));
+                metrics.wal_fsync_seconds.observe(t.elapsed().as_secs_f64());
             }
             IoCmd::Snapshot { tick, bytes } => {
+                let len = bytes.len();
+                let t = Instant::now();
                 write_snapshot_atomic(&snapshot_path, &bytes)
                     .await
                     .unwrap_or_else(|e| panic!("snapshot write: {e}"));
                 wal = truncate_wal(&wal_path, chunk_size)
                     .await
                     .unwrap_or_else(|e| panic!("wal truncate: {e}"));
+                metrics.snapshot_seconds.observe(t.elapsed().as_secs_f64());
+                metrics.snapshot_bytes.set(len as i64);
                 tracing::info!(tick, "snapshot saved; wal truncated");
             }
         }

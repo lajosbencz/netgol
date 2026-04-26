@@ -136,7 +136,7 @@ impl Hub {
                 // materialise per-chunk flag overlays before any state arrives.
                 let regions_msg = ServerMsg::Regions { regions: self.regions.to_vec() };
                 self.send_to(peer_id, &regions_msg);
-                self.metrics.set_client_sessions(self.peers.len() as u64);
+                self.metrics.client_sessions.set(self.peers.len() as i64);
             }
             HubCmd::Leave { peer_id } => self.drop_peer(peer_id),
             HubCmd::Client { peer_id, msg } => self.handle_client_msg(peer_id, msg).await,
@@ -184,6 +184,7 @@ impl Hub {
                     if !self.send_to(peer_id, &msg) {
                         return;
                     }
+                    self.metrics.chunk_state_sent_total.inc();
                 }
             }
             ClientMsg::Unsubscribe(coords) => {
@@ -208,6 +209,7 @@ impl Hub {
                     !region::is_locked(&self.regions, ax, ay)
                 }).collect();
                 if !allowed.is_empty() {
+                    self.metrics.edits_total.inc_by(allowed.len() as u64);
                     self.sim_cmd_tx
                         .send(SimCmd::Edit(allowed))
                         .await
@@ -220,6 +222,8 @@ impl Hub {
     async fn handle_sim_event(&mut self, ev: SimEvent) {
         let now = ev.tick;
         self.latest_tick = now;
+        let bytes_at_start = self.metrics.bytes_sent_total.get();
+        let msgs_at_start = self.metrics.messages_sent_total.get();
 
         if !ev.initial {
             for coord in self.chunk_subs.keys() {
@@ -255,7 +259,9 @@ impl Hub {
                 bits: snap.bits,
             });
             for pid in recipients {
-                self.send_bytes(pid, bytes.clone());
+                if self.send_bytes(pid, bytes.clone()) {
+                    self.metrics.chunk_delta_sent_total.inc();
+                }
             }
         }
 
@@ -280,6 +286,7 @@ impl Hub {
                 self.config.max_live_chunks,
             );
             if !to_reap.is_empty() {
+                self.metrics.reaped_chunks_total.inc_by(to_reap.len() as u64);
                 // Broadcast Reaped to all peers and update mirror immediately so the
                 // next tick's reaper input is consistent. Sim asynchronously removes.
                 for &coord in &to_reap {
@@ -298,33 +305,56 @@ impl Hub {
         if !ev.initial {
             self.compute_in_window += ev.compute_duration;
             self.ticks_in_window += 1;
+            self.metrics
+                .tick_compute_seconds
+                .observe(ev.compute_duration.as_secs_f64());
         }
         let window = self.window_started.elapsed();
         if window >= Duration::from_secs(1) {
             let secs = window.as_secs_f64();
-            self.metrics.set_tick_rate_hz(f64::from(self.ticks_in_window) / secs);
+            let hz = f64::from(self.ticks_in_window) / secs;
+            self.metrics.tick_rate_hz_milli.set((hz * 1000.0) as i64);
             let budget = Duration::from_micros(1_000_000 / u64::from(self.config.tick_hz)) * self.ticks_in_window;
             let util = if budget.is_zero() { 0.0 } else {
                 self.compute_in_window.as_secs_f64() / budget.as_secs_f64()
             };
-            self.metrics.set_tick_utilization(util);
+            self.metrics.tick_utilization_milli.set((util * 1000.0) as i64);
             self.window_started = Instant::now();
             self.ticks_in_window = 0;
             self.compute_in_window = Duration::ZERO;
         }
-        self.metrics.set_live_chunks(ev.live_count as u64);
+        self.metrics.live_chunks.set(ev.live_count as i64);
+
+        // Per-tick fan-out summary: max queue depth across peers.
+        if !ev.initial && !self.peers.is_empty() {
+            let cap = self.config.peer_outbound_capacity;
+            let max_depth = self.peers.values()
+                .map(|p| cap - p.tx.capacity())
+                .max()
+                .unwrap_or(0);
+            self.metrics.peer_outbound_depth_max.observe(max_depth as f64);
+        }
 
         let heartbeat_every = u64::from(self.config.tick_hz);
         if !ev.initial && heartbeat_every > 0 && now % heartbeat_every == 0 {
-            let live_chunks = u32::try_from(self.metrics.live_chunks())
+            let live_chunks = u32::try_from(self.metrics.live_chunks.get())
                 .expect("live_chunks exceeds u32 (>4B chunks)");
             let stats = ServerMsg::Stats {
                 tick: now,
                 live_chunks,
-                tick_rate_hz_milli: self.metrics.tick_rate_hz_milli(),
-                tick_utilization_milli: self.metrics.tick_utilization_milli(),
+                tick_rate_hz_milli: u32::try_from(self.metrics.tick_rate_hz_milli.get().max(0))
+                    .unwrap_or(u32::MAX),
+                tick_utilization_milli: u32::try_from(self.metrics.tick_utilization_milli.get().max(0))
+                    .unwrap_or(u32::MAX),
             };
             self.broadcast(&stats);
+        }
+
+        if !ev.initial {
+            let bytes_delta = self.metrics.bytes_sent_total.get().saturating_sub(bytes_at_start);
+            let msgs_delta = self.metrics.messages_sent_total.get().saturating_sub(msgs_at_start);
+            self.metrics.broadcast_bytes_per_tick.observe(bytes_delta as f64);
+            self.metrics.broadcast_messages_per_tick.observe(msgs_delta as f64);
         }
     }
 
@@ -341,11 +371,13 @@ impl Hub {
     }
 
     fn send_bytes(&mut self, peer_id: PeerId, bytes: Bytes) -> bool {
+        let len = bytes.len() as u64;
         let drop = match self.peers.get(&peer_id) {
             Some(peer) => peer.tx.try_send(bytes).is_err(),
             None => return false,
         };
         if drop {
+            self.metrics.peer_dropped_backpressure_total.inc();
             tracing::warn!(
                 peer = peer_id,
                 cap = self.config.peer_outbound_capacity,
@@ -354,6 +386,8 @@ impl Hub {
             self.drop_peer(peer_id);
             false
         } else {
+            self.metrics.bytes_sent_total.inc_by(len);
+            self.metrics.messages_sent_total.inc();
             true
         }
     }
@@ -369,7 +403,7 @@ impl Hub {
                 }
             }
         }
-        self.metrics.set_client_sessions(self.peers.len() as u64);
+        self.metrics.client_sessions.set(self.peers.len() as i64);
     }
 }
 

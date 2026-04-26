@@ -19,6 +19,7 @@ wasm-bindgen = "0.2"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "fs", "io-util", "signal"] }
 bytes = "1"
+prometheus = { version = "0.13", default-features = false }
 tokio-util = "0.7"
 futures-util = "0.3"
 tracing = "0.1"
