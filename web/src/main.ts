@@ -176,8 +176,8 @@ function connect() {
         break;
       case 'Stats':
         liveChunks = msg.liveChunks;
-        tickRateHz = msg.tickRateHzMilli / 1000;
-        tickUtilization = msg.tickUtilizationMilli / 1000;
+        tickRateHz = msg.tickRateHz;
+        tickUtilization = msg.tickUtilization;
         break;
     }
     scheduleFrame();

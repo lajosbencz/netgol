@@ -4,7 +4,7 @@
 //! Naming convention: `lazos_<subsystem>_<unit>` for everything new.
 
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder,
+    Encoder, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder,
 };
 use std::sync::Arc;
 
@@ -14,8 +14,8 @@ pub struct Metrics {
     // World/sim gauges (also surfaced to clients via Stats heartbeat).
     pub live_chunks: IntGauge,
     pub client_sessions: IntGauge,
-    pub tick_rate_hz_milli: IntGauge,    // value × 1000 to keep integer
-    pub tick_utilization_milli: IntGauge, // value × 1000 (so 500 = 0.5)
+    pub tick_rate_hz: Gauge,
+    pub tick_utilization: Gauge,
 
     // Sim compute.
     pub tick_compute_seconds: Histogram,
@@ -50,9 +50,16 @@ impl Metrics {
     pub fn new() -> Arc<Self> {
         let registry = Registry::new();
 
+        macro_rules! int_gauge {
+            ($name:expr, $help:expr) => {{
+                let g = IntGauge::new($name, $help).expect("int gauge");
+                registry.register(Box::new(g.clone())).expect("register int gauge");
+                g
+            }};
+        }
         macro_rules! gauge {
             ($name:expr, $help:expr) => {{
-                let g = IntGauge::new($name, $help).expect("gauge");
+                let g = Gauge::new($name, $help).expect("gauge");
                 registry.register(Box::new(g.clone())).expect("register gauge");
                 g
             }};
@@ -93,15 +100,15 @@ impl Metrics {
         const QUEUE_DEPTH_BUCKETS: [f64; 7] =
             [1.0, 8.0, 64.0, 256.0, 1_024.0, 4_096.0, 16_384.0];
 
-        let live_chunks = gauge!("lazos_live_chunks", "Number of live (non-empty) chunks in the world");
-        let client_sessions = gauge!("lazos_client_sessions", "Active websocket peers");
-        let tick_rate_hz_milli = gauge!(
-            "lazos_tick_rate_hz_milli",
-            "Observed sim tick rate in Hz × 1000"
+        let live_chunks = int_gauge!("lazos_live_chunks", "Number of live (non-empty) chunks in the world");
+        let client_sessions = int_gauge!("lazos_client_sessions", "Active websocket peers");
+        let tick_rate_hz = gauge!(
+            "lazos_tick_rate_hz",
+            "Observed sim tick rate in Hz"
         );
-        let tick_utilization_milli = gauge!(
-            "lazos_tick_utilization_milli",
-            "Fraction of tick budget spent computing × 1000 (1000 = 100%)"
+        let tick_utilization = gauge!(
+            "lazos_tick_utilization",
+            "Fraction of tick budget spent computing (0..1)"
         );
 
         let tick_compute_seconds = histogram!(
@@ -165,14 +172,14 @@ impl Metrics {
             "Atomic snapshot write + fsync duration",
             SNAPSHOT_BUCKETS
         );
-        let snapshot_bytes = gauge!("lazos_snapshot_bytes", "Size in bytes of the most recent snapshot");
+        let snapshot_bytes = int_gauge!("lazos_snapshot_bytes", "Size in bytes of the most recent snapshot");
 
         Arc::new(Self {
             registry,
             live_chunks,
             client_sessions,
-            tick_rate_hz_milli,
-            tick_utilization_milli,
+            tick_rate_hz,
+            tick_utilization,
             tick_compute_seconds,
             broadcast_bytes_per_tick,
             broadcast_messages_per_tick,

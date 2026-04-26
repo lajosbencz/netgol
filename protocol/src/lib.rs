@@ -37,7 +37,7 @@ pub struct Region {
     pub owner: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ServerMsg {
     Hello { tick: u64, chunk_size: u8 },
     /// World region table. Sent once after `Hello` and again whenever it changes.
@@ -46,13 +46,12 @@ pub enum ServerMsg {
     ChunkState { cx: i32, cy: i32, tick: u64, bits: [u8; BITS_BYTES] },
     ChunkDelta { cx: i32, cy: i32, tick: u64, bits: [u8; BITS_BYTES] },
     Reaped { cx: i32, cy: i32 },
-    /// Periodic broadcast of server-wide stats. `*_milli` fields are scaled by 1000
-    /// so the wire stays integer; divide by 1000 client-side for the human value.
+    /// Periodic broadcast of server-wide stats.
     Stats {
         tick: u64,
         live_chunks: u32,
-        tick_rate_hz_milli: u32,
-        tick_utilization_milli: u32,
+        tick_rate_hz: f32,
+        tick_utilization: f32,
     },
 }
 
@@ -126,12 +125,12 @@ pub fn encode_server(msg: &ServerMsg, out: &mut Vec<u8>) {
             out.extend_from_slice(&cx.to_le_bytes());
             out.extend_from_slice(&cy.to_le_bytes());
         }
-        ServerMsg::Stats { tick, live_chunks, tick_rate_hz_milli, tick_utilization_milli } => {
+        ServerMsg::Stats { tick, live_chunks, tick_rate_hz, tick_utilization } => {
             out.push(TAG_STATS);
             out.extend_from_slice(&tick.to_le_bytes());
             out.extend_from_slice(&live_chunks.to_le_bytes());
-            out.extend_from_slice(&tick_rate_hz_milli.to_le_bytes());
-            out.extend_from_slice(&tick_utilization_milli.to_le_bytes());
+            out.extend_from_slice(&tick_rate_hz.to_le_bytes());
+            out.extend_from_slice(&tick_utilization.to_le_bytes());
         }
     }
 }
@@ -171,8 +170,8 @@ pub fn decode_server(buf: &[u8]) -> Result<ServerMsg, DecodeError> {
         TAG_STATS => Ok(ServerMsg::Stats {
             tick: r.u64()?,
             live_chunks: r.u32()?,
-            tick_rate_hz_milli: r.u32()?,
-            tick_utilization_milli: r.u32()?,
+            tick_rate_hz: r.f32()?,
+            tick_utilization: r.f32()?,
         }),
         t => Err(DecodeError::UnknownTag(t)),
     }
@@ -295,6 +294,10 @@ impl<'a> Reader<'a> {
         let s = self.take(4)?;
         Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
     }
+    fn f32(&mut self) -> Result<f32, DecodeError> {
+        let s = self.take(4)?;
+        Ok(f32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    }
     fn i32(&mut self) -> Result<i32, DecodeError> {
         Ok(self.u32()? as i32)
     }
@@ -349,7 +352,7 @@ mod tests {
                 Region { x: 0, y: 0, w: 32, h: 32, flags: FLAG_OWNED, owner: 42 },
             ] },
             ServerMsg::Reaped { cx: 0, cy: -1 },
-            ServerMsg::Stats { tick: 42, live_chunks: 1234, tick_rate_hz_milli: 9994, tick_utilization_milli: 87 },
+            ServerMsg::Stats { tick: 42, live_chunks: 1234, tick_rate_hz: 9.994, tick_utilization: 0.087 },
         ];
         for msg in &cases {
             let mut buf = Vec::new();
@@ -395,7 +398,7 @@ mod tests {
     #[test]
     fn rejects_truncated() {
         let mut buf = Vec::new();
-        encode_server(&ServerMsg::Stats { tick: 1, live_chunks: 0, tick_rate_hz_milli: 0, tick_utilization_milli: 0 }, &mut buf);
+        encode_server(&ServerMsg::Stats { tick: 1, live_chunks: 0, tick_rate_hz: 0.0, tick_utilization: 0.0 }, &mut buf);
         buf.pop();
         assert!(matches!(decode_server(&buf), Err(DecodeError::Truncated)));
     }

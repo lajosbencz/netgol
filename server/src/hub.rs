@@ -313,12 +313,12 @@ impl Hub {
         if window >= Duration::from_secs(1) {
             let secs = window.as_secs_f64();
             let hz = f64::from(self.ticks_in_window) / secs;
-            self.metrics.tick_rate_hz_milli.set((hz * 1000.0) as i64);
+            self.metrics.tick_rate_hz.set(hz);
             let budget = Duration::from_micros(1_000_000 / u64::from(self.config.tick_hz)) * self.ticks_in_window;
             let util = if budget.is_zero() { 0.0 } else {
                 self.compute_in_window.as_secs_f64() / budget.as_secs_f64()
             };
-            self.metrics.tick_utilization_milli.set((util * 1000.0) as i64);
+            self.metrics.tick_utilization.set(util);
             self.window_started = Instant::now();
             self.ticks_in_window = 0;
             self.compute_in_window = Duration::ZERO;
@@ -342,10 +342,8 @@ impl Hub {
             let stats = ServerMsg::Stats {
                 tick: now,
                 live_chunks,
-                tick_rate_hz_milli: u32::try_from(self.metrics.tick_rate_hz_milli.get().max(0))
-                    .unwrap_or(u32::MAX),
-                tick_utilization_milli: u32::try_from(self.metrics.tick_utilization_milli.get().max(0))
-                    .unwrap_or(u32::MAX),
+                tick_rate_hz: self.metrics.tick_rate_hz.get() as f32,
+                tick_utilization: self.metrics.tick_utilization.get() as f32,
             };
             self.broadcast(&stats);
         }

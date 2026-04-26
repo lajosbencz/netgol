@@ -29,7 +29,7 @@ export type ServerMsg =
   | { kind: 'ChunkState'; cx: number; cy: number; tick: bigint; bits: Uint8Array }
   | { kind: 'ChunkDelta'; cx: number; cy: number; tick: bigint; bits: Uint8Array }
   | { kind: 'Reaped'; cx: number; cy: number }
-  | { kind: 'Stats'; tick: bigint; liveChunks: number; tickRateHzMilli: number; tickUtilizationMilli: number };
+  | { kind: 'Stats'; tick: bigint; liveChunks: number; tickRateHz: number; tickUtilization: number };
 
 export type EditCell = { cx: number; cy: number; lx: number; ly: number; alive: boolean };
 
@@ -72,8 +72,8 @@ export function decodeServer(buf: ArrayBuffer): ServerMsg {
         kind: 'Stats',
         tick: r.u64(),
         liveChunks: r.u32(),
-        tickRateHzMilli: r.u32(),
-        tickUtilizationMilli: r.u32(),
+        tickRateHz: r.f32(),
+        tickUtilization: r.f32(),
       };
     default:
       throw new Error(`unknown server tag 0x${tag.toString(16)}`);
@@ -121,6 +121,7 @@ class Reader {
   u16() { this.need(2); const v = this.dv.getUint16(this.pos, true); this.pos += 2; return v; }
   u32() { this.need(4); const v = this.dv.getUint32(this.pos, true); this.pos += 4; return v; }
   i32() { this.need(4); const v = this.dv.getInt32(this.pos, true); this.pos += 4; return v; }
+  f32() { this.need(4); const v = this.dv.getFloat32(this.pos, true); this.pos += 4; return v; }
   u64() { this.need(8); const v = this.dv.getBigUint64(this.pos, true); this.pos += 8; return v; }
   i64() { this.need(8); const v = this.dv.getBigInt64(this.pos, true); this.pos += 8; return v; }
   bytes(n: number) { this.need(n); const s = this.u8a.slice(this.pos, this.pos + n); this.pos += n; return s; }
