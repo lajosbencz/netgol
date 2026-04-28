@@ -1,7 +1,7 @@
 //! `CHUNK_SIZE x CHUNK_SIZE` packed-bitset chunk + bit-parallel step.
 
 use crate::CHUNK_SIZE;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 const LAST_BIT: usize = CHUNK_SIZE - 1;
 const ROW_MASK: u64 = if CHUNK_SIZE == 64 {
@@ -24,10 +24,14 @@ const _: () = assert!(CHUNK_SIZE <= 64, "row stored as u64");
 
 const HASH_MIX_K: u64 = 0x9E37_79B9_7F4A_7C15;
 
-/// One row per `u64`; bit `x` of `rows[y]` = cell at `(x, y)`.
+/// One row per `u64`; bit `x` of `rows[y]` = cell at `(x, y)`. Rows are
+/// `Arc`-shared so a snapshot dispatch is a refcount bump per chunk; the
+/// per-tick step always replaces the Arc wholesale (`Chunk::step` returns a
+/// fresh `Chunk`), and the only in-place row mutators (`set`, `freeze`) are
+/// edit-driven and copy-on-write via `Arc::make_mut`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
-    rows: [u64; CHUNK_SIZE],
+    rows: Arc<[u64; CHUNK_SIZE]>,
     pub frozen: Option<Arc<FrozenMask>>,
 }
 
@@ -37,10 +41,15 @@ impl Default for Chunk {
     }
 }
 
+fn empty_rows() -> Arc<[u64; CHUNK_SIZE]> {
+    static EMPTY: OnceLock<Arc<[u64; CHUNK_SIZE]>> = OnceLock::new();
+    Arc::clone(EMPTY.get_or_init(|| Arc::new([0u64; CHUNK_SIZE])))
+}
+
 impl Chunk {
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
-            rows: [0u64; CHUNK_SIZE],
+            rows: empty_rows(),
             frozen: None,
         }
     }
@@ -49,10 +58,16 @@ impl Chunk {
         rows: [u64; CHUNK_SIZE],
         frozen: Option<Arc<FrozenMask>>,
     ) -> Self {
-        Self { rows, frozen }
+        Self { rows: Arc::new(rows), frozen }
     }
 
     pub fn rows(&self) -> &[u64; CHUNK_SIZE] {
+        &self.rows
+    }
+
+    /// Borrow the row `Arc` directly so callers (e.g. the snapshot path) can
+    /// clone the handle instead of memcpy'ing 512 bytes per chunk.
+    pub fn rows_arc(&self) -> &Arc<[u64; CHUNK_SIZE]> {
         &self.rows
     }
 
@@ -69,10 +84,11 @@ impl Chunk {
             }
         }
         let bit = 1u64 << x;
+        let rows = Arc::make_mut(&mut self.rows);
         if alive {
-            self.rows[y] |= bit;
+            rows[y] |= bit;
         } else {
-            self.rows[y] &= !bit;
+            rows[y] &= !bit;
         }
     }
 
@@ -126,10 +142,11 @@ impl Chunk {
             mask.value[y] &= !bit;
         }
         // Apply immediately so reads/edges reflect the locked value.
+        let rows = Arc::make_mut(&mut self.rows);
         if alive {
-            self.rows[y] |= bit;
+            rows[y] |= bit;
         } else {
-            self.rows[y] &= !bit;
+            rows[y] &= !bit;
         }
     }
 
@@ -188,18 +205,17 @@ impl Chunk {
         #[cfg(not(target_feature = "avx2"))]
         kernel_scalar(&self.rows, halo, &mut out_rows);
 
-        let mut out = Chunk {
-            rows: out_rows,
-            frozen: self.frozen.clone(),
-        };
-        if let Some(mask) = out.frozen.as_ref() {
+        if let Some(mask) = self.frozen.as_ref() {
             for y in 0..CHUNK_SIZE {
                 let m = mask.mask[y];
                 let v = mask.value[y];
-                out.rows[y] = (out.rows[y] & !m) | (v & m);
+                out_rows[y] = (out_rows[y] & !m) | (v & m);
             }
         }
-        StepResult::Stepped(out)
+        StepResult::Stepped(Chunk {
+            rows: Arc::new(out_rows),
+            frozen: self.frozen.clone(),
+        })
     }
 }
 

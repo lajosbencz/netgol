@@ -335,9 +335,9 @@ async fn run(
 
                 if now >= next_snapshot_tick {
                     next_snapshot_tick = now + snapshot_interval_ticks;
-                    let bytes = crate::snapshot::serialize(&world);
+                    let snaps = crate::snapshot::collect(&world);
                     io_tx
-                        .send(IoCmd::Snapshot { tick: now, bytes })
+                        .send(IoCmd::Snapshot { tick: now, snaps })
                         .await
                         .expect("io channel closed during snapshot dispatch");
                 }

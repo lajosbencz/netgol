@@ -7,34 +7,56 @@
 //! All little-endian. No compression. Version/chunk_size mismatch → panic.
 
 use protocol::{bits_to_rows, rows_to_bits, BITS_BYTES};
-use simulation::{Chunk, FrozenMask, World, CHUNK_SIZE};
+use simulation::{Chunk, ChunkCoord, FrozenMask, World, CHUNK_SIZE};
 use std::io::Read;
 #[cfg(test)]
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 const MAGIC: [u8; 8] = *b"LAZOSWLD";
 const VERSION: u32 = 1;
 
-/// Serialize the entire world to an in-memory buffer. Cheap (single pass over
-/// chunks, no I/O) and called from the sim task so the IO task only does the
-/// fsync + rename.
-pub fn serialize(world: &World) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(world.len() * (8 + 1 + BITS_BYTES) + 32);
+/// Cheap structural snapshot of one chunk: coord + Arc-shared rows + Arc-shared
+/// frozen mask. Cloning the rows is a refcount bump, not a 512-byte copy, so
+/// `collect` can run on the sim hot loop in O(N) atomic ops.
+#[derive(Debug, Clone)]
+pub struct ChunkSnapRaw {
+    pub coord: ChunkCoord,
+    pub rows: Arc<[u64; CHUNK_SIZE]>,
+    pub frozen: Option<Arc<FrozenMask>>,
+}
+
+/// Sim-side: walk all chunks once, clone Arc handles. No sort, no bit-pack.
+pub fn collect(world: &World) -> Vec<ChunkSnapRaw> {
+    let mut out = Vec::with_capacity(world.len());
+    for (coord, chunk) in world.iter_chunks() {
+        out.push(ChunkSnapRaw {
+            coord,
+            rows: Arc::clone(chunk.rows_arc()),
+            frozen: chunk.frozen.clone(),
+        });
+    }
+    out
+}
+
+/// IO-side: sort for deterministic byte order, bit-pack each row array, build
+/// the on-disk byte buffer. Format identical to the previous `serialize`.
+pub fn encode(tick: u64, mut snaps: Vec<ChunkSnapRaw>) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(snaps.len() * (8 + 1 + BITS_BYTES) + 32);
     buf.extend_from_slice(&MAGIC);
     buf.extend_from_slice(&VERSION.to_le_bytes());
     buf.push(CHUNK_SIZE as u8);
-    buf.extend_from_slice(&world.tick_number().to_le_bytes());
-    let count = u32::try_from(world.len()).expect("chunk count > u32::MAX");
+    buf.extend_from_slice(&tick.to_le_bytes());
+    let count = u32::try_from(snaps.len()).expect("chunk count > u32::MAX");
     buf.extend_from_slice(&count.to_le_bytes());
-    // Sort for deterministic byte order (HashMap iter is non-deterministic).
-    let mut entries: Vec<_> = world.iter_chunks().collect();
-    entries.sort_by_key(|((cx, cy), _)| (*cx, *cy));
-    for ((cx, cy), chunk) in entries {
+    snaps.sort_by_key(|s| s.coord);
+    for snap in &snaps {
+        let (cx, cy) = snap.coord;
         buf.extend_from_slice(&cx.to_le_bytes());
         buf.extend_from_slice(&cy.to_le_bytes());
-        let bits = rows_to_bits(chunk.rows());
-        match &chunk.frozen {
+        let bits = rows_to_bits(&snap.rows);
+        match &snap.frozen {
             None => {
                 buf.push(0);
                 buf.extend_from_slice(&bits);
@@ -57,7 +79,7 @@ pub fn save(world: &World, path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let bytes = serialize(world);
+    let bytes = encode(world.tick_number(), collect(world));
     let tmp = path.with_extension("snap.tmp");
     {
         let file = std::fs::File::create(&tmp)?;

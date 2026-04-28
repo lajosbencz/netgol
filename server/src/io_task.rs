@@ -11,6 +11,7 @@
 //! immediately rather than as silent data loss.
 
 use crate::metrics::Metrics;
+use crate::snapshot::ChunkSnapRaw;
 use protocol::EditCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,8 +31,10 @@ const IO_CMD_CAPACITY: usize = 256;
 pub enum IoCmd {
     /// Edits applied this sim tick. Must arrive in tick order.
     AppendEdits { tick: u64, cells: Vec<EditCell> },
-    /// Pre-serialized snapshot bytes, for the IO task to write atomically.
-    Snapshot { tick: u64, bytes: Vec<u8> },
+    /// Cheap structural snapshot (Arc-shared rows + frozen masks). The IO task
+    /// sorts, bit-packs, and writes atomically - all CPU/IO work stays off the
+    /// sim hot loop.
+    Snapshot { tick: u64, snaps: Vec<ChunkSnapRaw> },
 }
 
 pub struct IoHandles {
@@ -69,9 +72,10 @@ async fn run(
                     .unwrap_or_else(|e| panic!("wal append: {e}"));
                 metrics.wal_fsync_seconds.observe(t.elapsed().as_secs_f64());
             }
-            IoCmd::Snapshot { tick, bytes } => {
-                let len = bytes.len();
+            IoCmd::Snapshot { tick, snaps } => {
                 let t = Instant::now();
+                let bytes = crate::snapshot::encode(tick, snaps);
+                let len = bytes.len();
                 write_snapshot_atomic(&snapshot_path, &bytes)
                     .await
                     .unwrap_or_else(|e| panic!("snapshot write: {e}"));
