@@ -2,9 +2,9 @@
 
 <img src="assets/glider.svg" alt="glider lifecycle" width="90" height="90" align="left">
 
-Networked Conway's Game of Life. One shared, persistent,
-effectively-infinite world that any number of clients can
-pan, zoom, and edit in real time.
+A journey into optimizations through Conway's Game of Life.
+
+One shared, persistent, effectively-infinite world that any number of clients can pan, zoom, and edit in real time.
 
 <br clear="left">
 
