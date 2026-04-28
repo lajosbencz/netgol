@@ -149,6 +149,22 @@ impl World {
         if !self.halo_for(coord).is_zero() {
             return false;
         }
+        // Verify the chunk's own edges are zero in every phase of the period.
+        // wake_chunk steps with an empty halo, so any cell that would spill into
+        // a neighbor chunk would produce incorrect results on wake.
+        {
+            let empty = crate::chunk::EdgeBundle::empty();
+            let mut probe = self.chunks.get(&coord).expect("contains_key checked above").clone();
+            for _ in 0..period {
+                if !probe.edges().is_zero() {
+                    return false;
+                }
+                probe = match probe.step(&empty) {
+                    crate::chunk::StepResult::Stepped(c) => c,
+                    crate::chunk::StepResult::Unchanged => probe,
+                };
+            }
+        }
         let chunk = self.chunks.remove(&coord).expect("contains_key checked above");
         self.oscillators.insert(coord, Oscillator {
             chunk,
