@@ -24,7 +24,6 @@ pub struct Oscillator {
 pub struct HashReport {
     pub coord: ChunkCoord,
     pub hash: u64,
-    pub halo_was_zero: bool,
     pub tick: u64,
 }
 
@@ -39,7 +38,6 @@ struct Ring {
     hashes: [u64; HISTORY],
     head: u8,
     filled: u8,
-    poisoned: bool,
     in_pending: bool,
     last_tick: u64,
 }
@@ -56,16 +54,6 @@ impl Detector {
     pub fn observe(&mut self, report: HashReport) {
         let coord = report.coord;
         let r = self.rings.entry(coord).or_default();
-        if !report.halo_was_zero {
-            r.head = 0;
-            r.filled = 0;
-            r.poisoned = true;
-            r.last_tick = report.tick;
-            return;
-        }
-        if r.poisoned {
-            r.poisoned = false;
-        }
         r.hashes[r.head as usize] = report.hash;
         r.head = ((r.head as usize + 1) % HISTORY) as u8;
         if (r.filled as usize) < HISTORY {
@@ -101,7 +89,7 @@ impl Detector {
                 continue;
             }
             ring.in_pending = false;
-            if ring.poisoned || (ring.filled as usize) < HISTORY {
+            if (ring.filled as usize) < HISTORY {
                 taken += 1;
                 continue;
             }
@@ -146,7 +134,7 @@ mod tests {
     use super::*;
 
     fn rep(coord: ChunkCoord, hash: u64, tick: u64) -> HashReport {
-        HashReport { coord, hash, halo_was_zero: true, tick }
+        HashReport { coord, hash, tick }
     }
 
     #[test]
@@ -185,18 +173,6 @@ mod tests {
         d.scan(64, &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].period, 3);
-    }
-
-    #[test]
-    fn poisoned_by_nonzero_halo() {
-        let mut d = Detector::new();
-        for t in 0..HISTORY as u64 {
-            d.observe(rep((0, 0), 42, t));
-        }
-        d.observe(HashReport { coord: (0, 0), hash: 42, halo_was_zero: false, tick: HISTORY as u64 });
-        let mut out = Vec::new();
-        d.scan(64, &mut out);
-        assert!(out.is_empty());
     }
 
     #[test]

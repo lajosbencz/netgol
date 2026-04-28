@@ -280,11 +280,9 @@ impl World {
         let now_tick = self.tick;
         for i in 0..self.scratch_candidates_vec.len() {
             let coord = self.scratch_candidates_vec[i];
-            let halo_was_zero;
             let result = {
                 let current = self.chunks.get(&coord).unwrap_or(&empty_chunk);
                 let halo = assemble_halo(coord, &self.scratch_edges);
-                halo_was_zero = halo.is_zero();
                 current.step(&halo)
             };
             let next = match result {
@@ -292,7 +290,6 @@ impl World {
                     outcome.hash_reports.push(HashReport {
                         coord,
                         hash: self.chunks.get(&coord).map(Chunk::hash_state).unwrap_or(0),
-                        halo_was_zero,
                         tick: now_tick,
                     });
                     continue;
@@ -321,7 +318,6 @@ impl World {
             outcome.hash_reports.push(HashReport {
                 coord,
                 hash: chunk_hash,
-                halo_was_zero,
                 tick: now_tick,
             });
         }

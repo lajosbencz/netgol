@@ -275,10 +275,13 @@ async fn run(
                 }
                 let start = Instant::now();
                 world.tick_into(&mut outcome);
-                if !outcome.hash_reports.is_empty() {
+                if !outcome.hash_reports.is_empty() || !outcome.removed.is_empty() {
                     let tracked;
                     {
                         let mut det = detector.lock().expect("detector mutex poisoned");
+                        for &coord in &outcome.removed {
+                            det.forget(coord);
+                        }
                         for r in outcome.hash_reports.drain(..) {
                             det.observe(r);
                         }
