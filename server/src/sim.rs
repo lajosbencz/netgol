@@ -255,19 +255,49 @@ async fn run(
                 }
             }
             _ = ticker.tick() => {
-                let mut drained = 0usize;
                 let mut promotions = 0u64;
-                while drained < cfg.oscillator_promote_max_per_tick {
+                // Drain pending promote requests into a local buffer so we can
+                // acquire the detector lock once for all group-formation attempts.
+                let mut promote_buf: Vec<PromoteRequest> = Vec::new();
+                while promote_buf.len() < cfg.oscillator_promote_max_per_tick {
                     match promote_rx.try_recv() {
-                        Ok(req) => {
-                            if !subscribed.contains(&req.coord)
-                                && world.promote_oscillator(req.coord, req.period)
-                            {
-                                promotions += 1;
-                            }
-                            drained += 1;
-                        }
+                        Ok(req) => promote_buf.push(req),
                         Err(_) => break,
+                    }
+                }
+                if !promote_buf.is_empty() {
+                    // Candidates that failed individual promotion and may form a group.
+                    let mut group_candidates: Vec<PromoteRequest> = Vec::new();
+                    for req in &promote_buf {
+                        if subscribed.contains(&req.coord) { continue; }
+                        if world.promote_oscillator(req.coord, req.period) {
+                            promotions += 1;
+                        } else {
+                            group_candidates.push(*req);
+                        }
+                    }
+                    if !group_candidates.is_empty() {
+                        let groups: Vec<(Vec<ChunkCoord>, u8)> = group_candidates
+                            .iter()
+                            .filter_map(|req| {
+                                collect_group(req.coord, req.period, &world, &subscribed)
+                                    .map(|members| (members, req.period))
+                            })
+                            .collect();
+                        // Track which coords we already promoted as part of a group this
+                        // tick to avoid double-promotion if two requests hit the same group.
+                        let mut promoted_coords: HashSet<ChunkCoord> = HashSet::new();
+                        for (members, period) in groups {
+                            if members.iter().any(|c| promoted_coords.contains(c)) { continue; }
+                            if world.promote_oscillator_group(&members, period) {
+                                promotions += members.len() as u64;
+                                // Forget all member rings so stale entries don't accumulate.
+                                let mut det = detector.lock().expect("detector mutex poisoned");
+                                for &c in &members { det.forget(c); }
+                                drop(det);
+                                promoted_coords.extend(members);
+                            }
+                        }
                     }
                 }
                 if promotions > 0 {
@@ -347,6 +377,60 @@ async fn run(
             }
         }
     }
+}
+
+/// Flood-fill the set of live chunks that interact with `seed` via mutual edge
+/// bits. Returns `None` if no group (>1 member) is found or if a subscribed coord
+/// would be included.
+///
+/// Period correctness and external-isolation are validated later inside
+/// `World::promote_oscillator_group`, which is the authoritative gate.
+fn collect_group(
+    seed: ChunkCoord,
+    period: u8,
+    world: &World,
+    subscribed: &HashSet<ChunkCoord>,
+) -> Option<Vec<ChunkCoord>> {
+    const MAX_GROUP: usize = 16;
+    let _ = period; // period unused here; kept for call-site symmetry
+    let mut group: Vec<ChunkCoord> = Vec::new();
+    let mut visited: HashSet<ChunkCoord> = HashSet::new();
+    let mut stack: Vec<ChunkCoord> = vec![seed];
+    while let Some(coord) = stack.pop() {
+        if !visited.insert(coord) { continue; }
+        if subscribed.contains(&coord) { return None; }
+        if group.len() >= MAX_GROUP { return None; }
+        let chunk = world.get_live_chunk(coord)?;
+        group.push(coord);
+        let (cx, cy) = coord;
+        let e = chunk.edges();
+        let candidates: [(u64, ChunkCoord); 8] = [
+            (e.top,                    (cx, cy - 1)),
+            (e.bottom,                 (cx, cy + 1)),
+            (e.left,                   (cx - 1, cy)),
+            (e.right,                  (cx + 1, cy)),
+            (u64::from(e.corners[0]),  (cx - 1, cy - 1)),
+            (u64::from(e.corners[1]),  (cx + 1, cy - 1)),
+            (u64::from(e.corners[2]),  (cx - 1, cy + 1)),
+            (u64::from(e.corners[3]),  (cx + 1, cy + 1)),
+        ];
+        for (bits, nb) in candidates {
+            if bits != 0 && !visited.contains(&nb) { stack.push(nb); }
+        }
+        // Also expand reverse: neighbors that point toward this coord.
+        for &nb in &[
+            (cx, cy - 1), (cx, cy + 1), (cx - 1, cy), (cx + 1, cy),
+            (cx - 1, cy - 1), (cx + 1, cy - 1), (cx - 1, cy + 1), (cx + 1, cy + 1),
+        ] {
+            if visited.contains(&nb) { continue; }
+            if let Some(nb_chunk) = world.get_live_chunk(nb) {
+                let (dx, dy) = (coord.0 - nb.0, coord.1 - nb.1);
+                if nb_chunk.has_edge_toward(dx, dy) { stack.push(nb); }
+            }
+        }
+    }
+    if group.len() <= 1 { return None; }
+    Some(group)
 }
 
 fn collect(world: &World, coords: impl Iterator<Item = ChunkCoord>, hint: usize) -> Vec<ChunkSnap> {

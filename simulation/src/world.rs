@@ -7,6 +7,7 @@ use crate::{CHUNK_SIZE, CHUNK_SIZE_I64};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::Arc;
 
 pub type ChunkCoord = (i32, i32);
 
@@ -38,10 +39,25 @@ impl Hasher for CoordHasher {
 pub(crate) type CoordMap<V> = HashMap<ChunkCoord, V, BuildHasherDefault<CoordHasher>>;
 type CoordSet = HashSet<ChunkCoord, BuildHasherDefault<CoordHasher>>;
 
+/// A group of 2+ chunks that collectively form an oscillating pattern straddling
+/// chunk boundaries. All members are paused together and woken together.
+/// Stored behind `Arc` so each member coord in `World::groups` shares ownership
+/// without duplication.
+#[derive(Debug, Clone)]
+pub struct OscillatorGroup {
+    /// Ordered slice; index `i` corresponds to the `u8` member index stored in
+    /// the groups map for fast O(1) chunk lookup by coord.
+    pub members: Box<[(ChunkCoord, Chunk)]>,
+    pub period: u8,
+    pub paused_at_tick: u64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct World {
     chunks: CoordMap<Chunk>,
     oscillators: CoordMap<Oscillator>,
+    /// Each member coord maps to (shared group, member index into group.members).
+    groups: CoordMap<(Arc<OscillatorGroup>, u8)>,
     tick: u64,
     /// Start-of-tick snapshot: halo assembly must not see mid-tick mutations
     /// from earlier candidates in the loop. Cleared (capacity retained) per tick.
@@ -70,17 +86,29 @@ impl World {
     }
 
     pub fn len(&self) -> usize {
-        self.chunks.len() + self.oscillators.len()
+        self.chunks.len() + self.oscillators.len() + self.groups.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty() && self.oscillators.is_empty()
+        self.chunks.is_empty() && self.oscillators.is_empty() && self.groups.is_empty()
     }
 
     pub fn get_chunk(&self, cx: i32, cy: i32) -> Option<&Chunk> {
+        let coord = (cx, cy);
         self.chunks
-            .get(&(cx, cy))
-            .or_else(|| self.oscillators.get(&(cx, cy)).map(|o| &o.chunk))
+            .get(&coord)
+            .or_else(|| self.oscillators.get(&coord).map(|o| &o.chunk))
+            .or_else(|| {
+                self.groups
+                    .get(&coord)
+                    .map(|(g, idx)| &g.members[*idx as usize].1)
+            })
+    }
+
+    /// Only live (non-paused) chunks. Used by group-collection to avoid including
+    /// already-paused neighbors in a new group.
+    pub fn get_live_chunk(&self, coord: ChunkCoord) -> Option<&Chunk> {
+        self.chunks.get(&coord)
     }
 
     pub fn iter_chunks(&self) -> impl Iterator<Item = (ChunkCoord, &Chunk)> {
@@ -88,6 +116,11 @@ impl World {
             .iter()
             .map(|(c, ch)| (*c, ch))
             .chain(self.oscillators.iter().map(|(c, o)| (*c, &o.chunk)))
+            .chain(
+                self.groups
+                    .iter()
+                    .map(|(c, (g, idx))| (*c, &g.members[*idx as usize].1)),
+            )
     }
 
     pub fn set_cell(&mut self, x: i64, y: i64, alive: bool) {
@@ -115,23 +148,33 @@ impl World {
     }
 
     /// Remove a chunk (used by the reaper). Returns `true` if it existed in
-    /// either `chunks` or `oscillators`.
+    /// `chunks`, `oscillators`, or `groups`. Removing a group member removes
+    /// the entire group (all its member coords are evicted).
     pub fn remove_chunk(&mut self, coord: ChunkCoord) -> bool {
         let in_chunks = self.chunks.remove(&coord).is_some();
         let in_oscillators = self.oscillators.remove(&coord).is_some();
-        in_chunks || in_oscillators
+        let in_groups = if let Some((group, _)) = self.groups.get(&coord).cloned() {
+            for (c, _) in group.members.iter() {
+                self.groups.remove(c);
+            }
+            true
+        } else {
+            false
+        };
+        in_chunks || in_oscillators || in_groups
     }
 
     pub fn set_tick_number(&mut self, tick: u64) {
         self.tick = tick;
     }
 
+    /// Total paused chunks: individual oscillators + all group members.
     pub fn oscillator_count(&self) -> usize {
-        self.oscillators.len()
+        self.oscillators.len() + self.groups.len()
     }
 
     pub fn is_oscillating(&self, coord: ChunkCoord) -> bool {
-        self.oscillators.contains_key(&coord)
+        self.oscillators.contains_key(&coord) || self.groups.contains_key(&coord)
     }
 
     /// Move a chunk from `chunks` to `oscillators`. Refuses if the chunk is
@@ -199,16 +242,114 @@ impl World {
         }
     }
 
-    /// If `coord` is paused, advance it to the current tick's phase and put it
-    /// back in `chunks`. Returns true if a wake happened.
+    /// Promote a cross-boundary oscillating group. `member_coords` must all be
+    /// live non-frozen chunks with the same period. The group is validated to be
+    /// externally isolated and self-contained across all P phases before committing.
+    pub fn promote_oscillator_group(&mut self, member_coords: &[ChunkCoord], period: u8) -> bool {
+        if period == 0 || (period as usize) > crate::oscillator::MAX_PERIOD {
+            return false;
+        }
+        for &coord in member_coords {
+            match self.chunks.get(&coord) {
+                Some(c) if !c.is_frozen() => {}
+                _ => return false,
+            }
+        }
+        let member_set: CoordSet = member_coords.iter().copied().collect();
+        // No external live chunk may have edge bits toward any member.
+        for &coord in member_coords {
+            let (cx, cy) = coord;
+            for &nb in &[
+                (cx, cy - 1), (cx, cy + 1), (cx - 1, cy), (cx + 1, cy),
+                (cx - 1, cy - 1), (cx + 1, cy - 1), (cx - 1, cy + 1), (cx + 1, cy + 1),
+            ] {
+                if member_set.contains(&nb) { continue; }
+                if let Some(ext) = self.chunks.get(&nb) {
+                    let (dx, dy) = (coord.0 - nb.0, coord.1 - nb.1);
+                    if ext.has_edge_toward(dx, dy) { return false; }
+                }
+            }
+        }
+        // Step the group through all P phases with mutual halos:
+        //   1. Edges must stay within the member set in every phase.
+        //   2. After P steps the group must return to its starting state (true periodicity).
+        {
+            let start_hashes: Vec<u64> = member_coords
+                .iter()
+                .map(|&c| self.chunks.get(&c).unwrap().hash_state())
+                .collect();
+            let mut cur: CoordMap<Chunk> = member_coords
+                .iter()
+                .map(|&c| (c, self.chunks.get(&c).unwrap().clone()))
+                .collect();
+            for _ in 0..period {
+                let edge_map: CoordMap<EdgeBundle> =
+                    cur.iter().map(|(&c, ch)| (c, ch.edges())).collect();
+                for (&coord, e) in &edge_map {
+                    let (cx, cy) = coord;
+                    let dirs: [(u64, ChunkCoord); 8] = [
+                        (e.top,                    (cx, cy - 1)),
+                        (e.bottom,                 (cx, cy + 1)),
+                        (e.left,                   (cx - 1, cy)),
+                        (e.right,                  (cx + 1, cy)),
+                        (u64::from(e.corners[0]),  (cx - 1, cy - 1)),
+                        (u64::from(e.corners[1]),  (cx + 1, cy - 1)),
+                        (u64::from(e.corners[2]),  (cx - 1, cy + 1)),
+                        (u64::from(e.corners[3]),  (cx + 1, cy + 1)),
+                    ];
+                    for (bits, nb) in dirs {
+                        if bits != 0 && !member_set.contains(&nb) { return false; }
+                    }
+                }
+                cur = cur
+                    .into_iter()
+                    .map(|(coord, chunk)| {
+                        let halo = assemble_halo(coord, &edge_map);
+                        let next = match chunk.step(&halo) {
+                            StepResult::Stepped(c) => c,
+                            StepResult::Unchanged => chunk,
+                        };
+                        (coord, next)
+                    })
+                    .collect();
+            }
+            // True period check: every member must be back to its starting hash.
+            for (&c, h) in member_coords.iter().zip(start_hashes.iter()) {
+                if cur.get(&c).map(Chunk::hash_state).unwrap_or(0) != *h {
+                    return false;
+                }
+            }
+        }
+        let members: Box<[(ChunkCoord, Chunk)]> = member_coords
+            .iter()
+            .map(|&c| (c, self.chunks.remove(&c).expect("validated above")))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let group = Arc::new(OscillatorGroup { members, period, paused_at_tick: self.tick });
+        for (idx, &coord) in member_coords.iter().enumerate() {
+            self.groups.insert(coord, (Arc::clone(&group), idx as u8));
+        }
+        true
+    }
+
+    /// If `coord` is paused (individual or group), advance to the current phase
+    /// and reinsert into `chunks`. Returns true if a wake happened.
     pub fn wake_if_paused(&mut self, coord: ChunkCoord) -> bool {
         if let Some(osc) = self.oscillators.remove(&coord) {
-            let chunk = wake_chunk(osc, self.tick);
-            self.chunks.insert(coord, chunk);
-            true
-        } else {
-            false
+            self.chunks.insert(coord, wake_chunk(osc, self.tick));
+            return true;
         }
+        if let Some((group, _)) = self.groups.get(&coord).cloned() {
+            let woken = wake_group(&group, self.tick);
+            for (c, _) in group.members.iter() {
+                self.groups.remove(c);
+            }
+            for (c, chunk) in woken {
+                self.chunks.insert(c, chunk);
+            }
+            return true;
+        }
+        false
     }
 
     /// Advance every live chunk and its neighbors by one GoL step.
@@ -242,7 +383,7 @@ impl World {
             self.scratch_edges.insert(coord, ch.edges());
         }
 
-        if !self.oscillators.is_empty() {
+        if !self.oscillators.is_empty() || !self.groups.is_empty() {
             for (&(x, y), e) in &self.scratch_edges {
                 let probes: [(bool, ChunkCoord); 8] = [
                     (e.top != 0, (x, y - 1)),
@@ -255,7 +396,9 @@ impl World {
                     (e.corners[3] != 0, (x + 1, y + 1)),
                 ];
                 for (has_bit, c) in probes {
-                    if has_bit && self.oscillators.contains_key(&c) {
+                    if has_bit
+                        && (self.oscillators.contains_key(&c) || self.groups.contains_key(&c))
+                    {
                         self.scratch_wakes.push(c);
                     }
                 }
@@ -263,12 +406,26 @@ impl World {
             self.scratch_wakes.sort_unstable();
             self.scratch_wakes.dedup();
             for &coord in &self.scratch_wakes {
-                let osc = self.oscillators.remove(&coord).expect("contains_key probed above");
-                let chunk = wake_chunk(osc, self.tick);
-                self.scratch_edges.insert(coord, chunk.edges());
-                self.chunks.insert(coord, chunk);
-                outcome.changed.push(coord);
-                outcome.perturbation_wakes += 1;
+                if let Some(osc) = self.oscillators.remove(&coord) {
+                    let chunk = wake_chunk(osc, self.tick);
+                    self.scratch_edges.insert(coord, chunk.edges());
+                    self.chunks.insert(coord, chunk);
+                    outcome.changed.push(coord);
+                    outcome.perturbation_wakes += 1;
+                } else if let Some((group, _)) = self.groups.get(&coord).cloned() {
+                    // Guard against re-processing another member of an already-woken group.
+                    if !self.groups.contains_key(&coord) { continue; }
+                    let woken = wake_group(&group, self.tick);
+                    for (c, _) in group.members.iter() {
+                        self.groups.remove(c);
+                    }
+                    for (c, chunk) in woken {
+                        self.scratch_edges.insert(c, chunk.edges());
+                        self.chunks.insert(c, chunk);
+                        outcome.changed.push(c);
+                        outcome.perturbation_wakes += 1;
+                    }
+                }
             }
         }
 
@@ -365,6 +522,28 @@ fn wake_chunk(osc: Oscillator, current_tick: u64) -> Chunk {
         };
     }
     chunk
+}
+
+fn wake_group(group: &OscillatorGroup, current_tick: u64) -> Vec<(ChunkCoord, Chunk)> {
+    let skipped = current_tick.saturating_sub(group.paused_at_tick);
+    let phase_offset = (skipped % u64::from(group.period)) as u8;
+    let mut members: Vec<(ChunkCoord, Chunk)> = group.members.iter().cloned().collect();
+    for _ in 0..phase_offset {
+        let edge_map: CoordMap<EdgeBundle> =
+            members.iter().map(|(c, ch)| (*c, ch.edges())).collect();
+        members = members
+            .into_iter()
+            .map(|(coord, chunk)| {
+                let halo = assemble_halo(coord, &edge_map);
+                let next = match chunk.step(&halo) {
+                    StepResult::Stepped(c) => c,
+                    StepResult::Unchanged => chunk,
+                };
+                (coord, next)
+            })
+            .collect();
+    }
+    members
 }
 
 fn assemble_halo(coord: ChunkCoord, cache: &CoordMap<EdgeBundle>) -> EdgeBundle {
@@ -576,6 +755,57 @@ mod tests {
         }
         assert_eq!(paused.tick_number(), plain.tick_number());
         assert_eq!(collect_live(&paused), collect_live(&plain), "paused/plain diverged");
+    }
+
+    #[test]
+    fn boundary_blinker_promoted_as_group() {
+        // Blinker centred at x = CHUNK_SIZE - 1 (right edge of chunk 0).
+        // Horizontal phase spills one cell into chunk (1, 0).
+        // Individual promote must reject it; group promote must accept it.
+        // After pausing, running for 100 more ticks must match a plain world.
+        let bx = CHUNK_SIZE_I64 - 1;
+        let by = 32i64;
+        let mut grouped = World::new();
+        let mut plain = World::new();
+        for w in [&mut grouped, &mut plain] {
+            for &(dx, dy) in &[(0i64, -1), (0, 0), (0, 1)] {
+                w.set_cell(bx + dx, by + dy, true);
+            }
+        }
+        let mut det = crate::oscillator::Detector::new();
+        let mut outcome = TickOutcome::default();
+        // Run until the group gets promoted (at most 200 ticks).
+        for _ in 0..200 {
+            if grouped.is_oscillating((0, 0)) && grouped.is_oscillating((1, 0)) { break; }
+            grouped.tick_into(&mut outcome);
+            for r in outcome.hash_reports.drain(..) { det.observe(r); }
+            let mut promote_buf = Vec::new();
+            det.scan(64, &mut promote_buf);
+            for req in promote_buf.drain(..) {
+                if !grouped.promote_oscillator(req.coord, req.period) {
+                    // Flood-fill live edge-neighbors and try as a group.
+                    let (cx, cy) = req.coord;
+                    let mut members = vec![req.coord];
+                    for &nb in &[(cx+1,cy),(cx-1,cy),(cx,cy+1),(cx,cy-1)] {
+                        if grouped.get_live_chunk(nb).is_some() { members.push(nb); }
+                    }
+                    if members.len() > 1 {
+                        grouped.promote_oscillator_group(&members, req.period);
+                    }
+                }
+            }
+        }
+        assert!(grouped.is_oscillating((0, 0)), "chunk (0,0) not promoted");
+        assert!(grouped.is_oscillating((1, 0)), "chunk (1,0) not promoted");
+        // Both worlds must converge after 100 more ticks.
+        let target = grouped.tick_number() + 100;
+        while plain.tick_number() < target { plain.tick(); }
+        for _ in 0..100 {
+            grouped.tick_into(&mut outcome);
+            for r in outcome.hash_reports.drain(..) { det.observe(r); }
+        }
+        assert_eq!(grouped.tick_number(), plain.tick_number());
+        assert_eq!(collect_live(&grouped), collect_live(&plain), "group/plain diverged");
     }
 
     #[test]

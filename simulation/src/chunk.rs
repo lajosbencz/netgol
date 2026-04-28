@@ -163,6 +163,23 @@ impl Chunk {
         }
     }
 
+    /// Whether this chunk has cells on the edge that faces direction `(dx, dy)`
+    /// relative to a neighbor, i.e. whether it could influence that neighbor.
+    pub fn has_edge_toward(&self, dx: i32, dy: i32) -> bool {
+        let e = self.edges();
+        match (dx, dy) {
+            (0, -1) => e.top != 0,
+            (0, 1) => e.bottom != 0,
+            (-1, 0) => e.left != 0,
+            (1, 0) => e.right != 0,
+            (-1, -1) => e.corners[0] != 0,
+            (1, -1) => e.corners[1] != 0,
+            (-1, 1) => e.corners[2] != 0,
+            (1, 1) => e.corners[3] != 0,
+            _ => false,
+        }
+    }
+
     /// Top/bottom rows + left/right columns + 4 corners, packed for halo assembly.
     pub fn edges(&self) -> EdgeBundle {
         let top = self.rows[0];

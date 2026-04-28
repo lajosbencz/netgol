@@ -101,6 +101,13 @@ impl Detector {
         }
     }
 
+    /// Returns the detected period for `coord` without consuming its ring.
+    pub fn period_of(&self, coord: ChunkCoord) -> Option<u8> {
+        let ring = self.rings.get(&coord)?;
+        if (ring.filled as usize) < HISTORY { return None; }
+        detect_period(ring)
+    }
+
     pub fn len(&self) -> usize { self.rings.len() }
     pub fn is_empty(&self) -> bool { self.rings.is_empty() }
     pub fn pending_len(&self) -> usize { self.pending.len() }
