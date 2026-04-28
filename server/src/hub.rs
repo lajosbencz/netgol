@@ -73,6 +73,7 @@ pub fn spawn(
         peer_ids_scratch: Vec::new(),
         reaper_subscribed_scratch: HashSet::new(),
         reaper_info_scratch: HashMap::new(),
+        pending_sim_unsub: Vec::new(),
     };
     tokio::spawn(hub.run(rx, sim_event_rx));
     tx
@@ -96,6 +97,10 @@ struct Hub {
     peer_ids_scratch: Vec<PeerId>,
     reaper_subscribed_scratch: HashSet<ChunkCoord>,
     reaper_info_scratch: HashMap<ChunkCoord, ReapInfo>,
+    /// Coords whose subscriber count just hit zero. Buffered because they can
+    /// originate from sync paths (a peer drop on backpressure during fan-out)
+    /// where we cannot await; drained by the run loop after each event.
+    pending_sim_unsub: Vec<ChunkCoord>,
 }
 
 impl Hub {
@@ -119,6 +124,7 @@ impl Hub {
                     }
                 }
             }
+            self.flush_sim_unsub_pending().await;
         }
     }
 
@@ -158,7 +164,7 @@ impl Hub {
                 let now = self.latest_tick;
                 let cap = self.config.client_max_chunks as usize;
                 let mut to_send: Vec<ServerMsg> = Vec::new();
-                let mut wake: Vec<ChunkCoord> = Vec::new();
+                let mut sim_subscribe: Vec<ChunkCoord> = Vec::new();
                 let mut overflow = false;
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     for coord in coords {
@@ -168,9 +174,13 @@ impl Hub {
                             break;
                         }
                         peer.subscribed.insert(coord);
-                        self.chunk_subs.entry(coord).or_default().insert(peer_id);
+                        let entry = self.chunk_subs.entry(coord).or_default();
+                        let was_zero = entry.is_empty();
+                        entry.insert(peer_id);
+                        if was_zero {
+                            sim_subscribe.push(coord);
+                        }
                         self.last_seen_tick.insert(coord, now);
-                        wake.push(coord);
                         if let Some(m) = self.mirror.get(&coord) {
                             if m.live_count > 0 || m.frozen_mask.is_some() {
                                 to_send.push(ServerMsg::ChunkState {
@@ -188,9 +198,9 @@ impl Hub {
                     self.drop_peer(peer_id);
                     return;
                 }
-                if !wake.is_empty() {
-                    if let Err(e) = self.sim_cmd_tx.send(SimCmd::WakeIfPaused(wake)).await {
-                        tracing::error!(err = %e, "sim cmd channel closed during subscribe wake");
+                if !sim_subscribe.is_empty() {
+                    if let Err(e) = self.sim_cmd_tx.send(SimCmd::Subscribe(sim_subscribe)).await {
+                        tracing::error!(err = %e, "sim cmd channel closed during subscribe");
                         return;
                     }
                 }
@@ -202,6 +212,7 @@ impl Hub {
                 }
             }
             ClientMsg::Unsubscribe(coords) => {
+                let mut sim_unsubscribe: Vec<ChunkCoord> = Vec::new();
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     for coord in coords {
                         if peer.subscribed.remove(&coord) {
@@ -209,9 +220,16 @@ impl Hub {
                                 set.remove(&peer_id);
                                 if set.is_empty() {
                                     self.chunk_subs.remove(&coord);
+                                    sim_unsubscribe.push(coord);
                                 }
                             }
                         }
+                    }
+                }
+                if !sim_unsubscribe.is_empty() {
+                    if let Err(e) = self.sim_cmd_tx.send(SimCmd::Unsubscribe(sim_unsubscribe)).await {
+                        tracing::error!(err = %e, "sim cmd channel closed during unsubscribe");
+                        return;
                     }
                 }
             }
@@ -428,11 +446,20 @@ impl Hub {
                     set.remove(&peer_id);
                     if set.is_empty() {
                         self.chunk_subs.remove(&coord);
+                        self.pending_sim_unsub.push(coord);
                     }
                 }
             }
         }
         self.metrics.client_sessions.set(self.peers.len() as i64);
+    }
+
+    async fn flush_sim_unsub_pending(&mut self) {
+        if self.pending_sim_unsub.is_empty() { return; }
+        let coords = std::mem::take(&mut self.pending_sim_unsub);
+        if let Err(e) = self.sim_cmd_tx.send(SimCmd::Unsubscribe(coords)).await {
+            tracing::error!(err = %e, "sim cmd channel closed during pending unsubscribe flush");
+        }
     }
 }
 

@@ -20,7 +20,13 @@ use tokio::time::{interval, MissedTickBehavior};
 pub enum SimCmd {
     Edit(Vec<EditCell>),
     Reap(Vec<ChunkCoord>),
-    WakeIfPaused(Vec<ChunkCoord>),
+    /// Coords newly observed by at least one peer (0->1 transitions). The sim
+    /// wakes any paused entry and refuses to pause these coords while they
+    /// remain in the subscribed set.
+    Subscribe(Vec<ChunkCoord>),
+    /// Coords no longer observed by any peer (1->0 transitions). Pausing
+    /// becomes eligible again on the next detector promotion.
+    Unsubscribe(Vec<ChunkCoord>),
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +152,8 @@ async fn run(
     let mut outcome = TickOutcome::default();
     let mut dedup_scratch: HashSet<ChunkCoord> = HashSet::new();
     let mut last_overrun_warn: Option<Instant> = None;
+    // Subscribed: coords with >=1 peer observing. Pause-ineligible while present.
+    let mut subscribed: HashSet<ChunkCoord> = HashSet::new();
 
     loop {
         tokio::select! {
@@ -208,11 +216,17 @@ async fn run(
                             det.forget(coord);
                         }
                     }
-                    SimCmd::WakeIfPaused(coords) => {
+                    SimCmd::Subscribe(coords) => {
                         let mut woken: HashSet<ChunkCoord> = HashSet::new();
-                        for coord in coords {
-                            if world.wake_if_paused(coord) {
-                                woken.insert(coord);
+                        {
+                            let mut det = detector.lock().expect("detector mutex poisoned");
+                            for coord in coords {
+                                if subscribed.insert(coord) {
+                                    if world.wake_if_paused(coord) {
+                                        woken.insert(coord);
+                                    }
+                                    det.forget(coord);
+                                }
                             }
                         }
                         if !woken.is_empty() {
@@ -230,7 +244,12 @@ async fn run(
                                     initial: false,
                                 })
                                 .await
-                                .expect("sim event channel closed during wake (hub gone)");
+                                .expect("sim event channel closed during subscribe wake (hub gone)");
+                        }
+                    }
+                    SimCmd::Unsubscribe(coords) => {
+                        for coord in coords {
+                            subscribed.remove(&coord);
                         }
                     }
                 }
@@ -241,7 +260,9 @@ async fn run(
                 while drained < cfg.oscillator_promote_max_per_tick {
                     match promote_rx.try_recv() {
                         Ok(req) => {
-                            if world.promote_oscillator(req.coord, req.period) {
+                            if !subscribed.contains(&req.coord)
+                                && world.promote_oscillator(req.coord, req.period)
+                            {
                                 promotions += 1;
                             }
                             drained += 1;
