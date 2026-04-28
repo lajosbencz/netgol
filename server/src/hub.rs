@@ -158,6 +158,7 @@ impl Hub {
                 let now = self.latest_tick;
                 let cap = self.config.client_max_chunks as usize;
                 let mut to_send: Vec<ServerMsg> = Vec::new();
+                let mut wake: Vec<ChunkCoord> = Vec::new();
                 let mut overflow = false;
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     for coord in coords {
@@ -169,9 +170,7 @@ impl Hub {
                         peer.subscribed.insert(coord);
                         self.chunk_subs.entry(coord).or_default().insert(peer_id);
                         self.last_seen_tick.insert(coord, now);
-                        // Adaptive: only send ChunkState if the chunk has live cells
-                        // OR overlaps a frozen region. Empty unflagged chunks are
-                        // visually empty.
+                        wake.push(coord);
                         if let Some(m) = self.mirror.get(&coord) {
                             if m.live_count > 0 || m.frozen_mask.is_some() {
                                 to_send.push(ServerMsg::ChunkState {
@@ -188,6 +187,12 @@ impl Hub {
                     tracing::warn!(peer = peer_id, cap, "subscribe exceeds client_max_chunks; dropping peer");
                     self.drop_peer(peer_id);
                     return;
+                }
+                if !wake.is_empty() {
+                    if let Err(e) = self.sim_cmd_tx.send(SimCmd::WakeIfPaused(wake)).await {
+                        tracing::error!(err = %e, "sim cmd channel closed during subscribe wake");
+                        return;
+                    }
                 }
                 for msg in to_send {
                     if !self.send_to(peer_id, &msg) {

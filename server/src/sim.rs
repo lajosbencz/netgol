@@ -18,6 +18,7 @@ use tokio::time::{interval, MissedTickBehavior};
 pub enum SimCmd {
     Edit(Vec<EditCell>),
     Reap(Vec<ChunkCoord>),
+    WakeIfPaused(Vec<ChunkCoord>),
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +159,9 @@ async fn run(
                 match cmd {
                     SimCmd::Edit(cells) => {
                         for c in &cells {
+                            world.wake_if_paused((c.cx, c.cy));
+                        }
+                        for c in &cells {
                             let ax = i64::from(c.cx) * CHUNK_SIZE_I64 + i64::from(c.lx);
                             let ay = i64::from(c.cy) * CHUNK_SIZE_I64 + i64::from(c.ly);
                             world.set_cell(ax, ay, c.alive);
@@ -195,6 +199,30 @@ async fn run(
                         // this; no SimEvent needed.
                         for coord in coords {
                             world.remove_chunk(coord);
+                        }
+                    }
+                    SimCmd::WakeIfPaused(coords) => {
+                        let mut woken: HashSet<ChunkCoord> = HashSet::new();
+                        for coord in coords {
+                            if world.wake_if_paused(coord) {
+                                woken.insert(coord);
+                            }
+                        }
+                        if !woken.is_empty() {
+                            let hint = woken.len();
+                            let snaps = collect(&world, woken.into_iter(), hint);
+                            let now_tick = world.tick_number();
+                            event_tx
+                                .send(SimEvent {
+                                    tick: now_tick,
+                                    changed: snaps,
+                                    removed: vec![],
+                                    live_count: world.len(),
+                                    compute_duration: Duration::ZERO,
+                                    initial: false,
+                                })
+                                .await
+                                .expect("sim event channel closed during wake (hub gone)");
                         }
                     }
                 }
