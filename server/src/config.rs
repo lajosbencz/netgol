@@ -17,8 +17,6 @@ pub struct Config {
     #[serde(default = "default_client_max_chunks")]
     pub client_max_chunks: u32,
 
-    #[serde(default = "default_osc_enabled")]
-    pub oscillator_detection_enabled: bool,
     #[serde(default = "default_osc_interval_ms")]
     pub oscillator_detection_interval_ms: u64,
     #[serde(default = "default_osc_budget")]
@@ -28,7 +26,6 @@ pub struct Config {
 }
 
 fn default_client_max_chunks() -> u32 { 65535 }
-fn default_osc_enabled() -> bool { false }
 fn default_osc_interval_ms() -> u64 { 250 }
 fn default_osc_budget() -> usize { 1000 }
 fn default_osc_promote_per_tick() -> usize { 256 }

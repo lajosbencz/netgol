@@ -43,7 +43,6 @@ pub struct World {
     chunks: CoordMap<Chunk>,
     oscillators: CoordMap<Oscillator>,
     tick: u64,
-    osc_detection_enabled: bool,
     /// Start-of-tick snapshot: halo assembly must not see mid-tick mutations
     /// from earlier candidates in the loop. Cleared (capacity retained) per tick.
     scratch_edges: CoordMap<EdgeBundle>,
@@ -69,19 +68,24 @@ impl World {
     }
 
     pub fn len(&self) -> usize {
-        self.chunks.len()
+        self.chunks.len() + self.oscillators.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty()
+        self.chunks.is_empty() && self.oscillators.is_empty()
     }
 
     pub fn get_chunk(&self, cx: i32, cy: i32) -> Option<&Chunk> {
-        self.chunks.get(&(cx, cy))
+        self.chunks
+            .get(&(cx, cy))
+            .or_else(|| self.oscillators.get(&(cx, cy)).map(|o| &o.chunk))
     }
 
     pub fn iter_chunks(&self) -> impl Iterator<Item = (ChunkCoord, &Chunk)> {
-        self.chunks.iter().map(|(c, ch)| (*c, ch))
+        self.chunks
+            .iter()
+            .map(|(c, ch)| (*c, ch))
+            .chain(self.oscillators.iter().map(|(c, o)| (*c, &o.chunk)))
     }
 
     pub fn set_cell(&mut self, x: i64, y: i64, alive: bool) {
@@ -120,16 +124,6 @@ impl World {
         self.tick = tick;
     }
 
-    pub fn set_oscillator_detection(&mut self, enabled: bool) {
-        self.osc_detection_enabled = enabled;
-        if !enabled {
-            for (coord, osc) in self.oscillators.drain() {
-                let chunk = wake_chunk(osc, self.tick);
-                self.chunks.insert(coord, chunk);
-            }
-        }
-    }
-
     pub fn oscillator_count(&self) -> usize {
         self.oscillators.len()
     }
@@ -143,7 +137,7 @@ impl World {
     /// can be stale by the time the sim drains the request). Returns true on
     /// success.
     pub fn promote_oscillator(&mut self, coord: ChunkCoord, period: u8) -> bool {
-        if !self.osc_detection_enabled || period == 0 || (period as usize) > crate::oscillator::MAX_PERIOD {
+        if period == 0 || (period as usize) > crate::oscillator::MAX_PERIOD {
             return false;
         }
         match self.chunks.get(&coord) {
@@ -279,7 +273,6 @@ impl World {
         }
 
         let empty_chunk = Chunk::empty();
-        let detect = self.osc_detection_enabled;
         let now_tick = self.tick;
         for i in 0..self.scratch_candidates_vec.len() {
             let coord = self.scratch_candidates_vec[i];
@@ -292,14 +285,12 @@ impl World {
             };
             let next = match result {
                 StepResult::Unchanged => {
-                    if detect {
-                        outcome.hash_reports.push(HashReport {
-                            coord,
-                            hash: self.chunks.get(&coord).map(Chunk::hash_state).unwrap_or(0),
-                            halo_was_zero,
-                            tick: now_tick,
-                        });
-                    }
+                    outcome.hash_reports.push(HashReport {
+                        coord,
+                        hash: self.chunks.get(&coord).map(Chunk::hash_state).unwrap_or(0),
+                        halo_was_zero,
+                        tick: now_tick,
+                    });
                     continue;
                 }
                 StepResult::Stepped(c) => c,
@@ -310,7 +301,7 @@ impl World {
                 }
                 continue;
             }
-            let chunk_hash = if detect { next.hash_state() } else { 0 };
+            let chunk_hash = next.hash_state();
             match self.chunks.entry(coord) {
                 Entry::Occupied(mut slot) => {
                     if slot.get().rows() != next.rows() {
@@ -323,14 +314,12 @@ impl World {
                     outcome.changed.push(coord);
                 }
             }
-            if detect {
-                outcome.hash_reports.push(HashReport {
-                    coord,
-                    hash: chunk_hash,
-                    halo_was_zero,
-                    tick: now_tick,
-                });
-            }
+            outcome.hash_reports.push(HashReport {
+                coord,
+                hash: chunk_hash,
+                halo_was_zero,
+                tick: now_tick,
+            });
         }
 
         self.tick = self.tick.checked_add(1).expect("tick counter overflow");

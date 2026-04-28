@@ -58,18 +58,15 @@ const HASH_BATCH_CAPACITY: usize = 16;
 /// Promote requests queued back from detector to sim.
 const PROMOTE_CAPACITY: usize = 1024;
 
-pub fn spawn(cfg: Config, mut world: World, io_tx: mpsc::Sender<IoCmd>) -> SimHandles {
+pub fn spawn(cfg: Config, world: World, io_tx: mpsc::Sender<IoCmd>) -> SimHandles {
     let (cmd_tx, cmd_rx) = mpsc::channel(1024);
     let (event_tx, event_rx) = mpsc::channel(SIM_EVENT_CAPACITY);
     let (hash_tx, hash_rx) = mpsc::channel::<Vec<HashReport>>(HASH_BATCH_CAPACITY);
     let (promote_tx, promote_rx) = mpsc::channel::<PromoteRequest>(PROMOTE_CAPACITY);
 
-    world.set_oscillator_detection(cfg.oscillator_detection_enabled);
-    if cfg.oscillator_detection_enabled {
-        let interval_ms = cfg.oscillator_detection_interval_ms;
-        let budget = cfg.oscillator_detection_max_chunks_per_step;
-        tokio::spawn(detector_run(hash_rx, promote_tx, interval_ms, budget));
-    }
+    let interval_ms = cfg.oscillator_detection_interval_ms;
+    let budget = cfg.oscillator_detection_max_chunks_per_step;
+    tokio::spawn(detector_run(hash_rx, promote_tx, interval_ms, budget));
 
     tokio::spawn(run(cfg, world, cmd_rx, event_tx, io_tx, hash_tx, promote_rx));
     SimHandles { cmd_tx, event_rx }
@@ -228,21 +225,19 @@ async fn run(
                 }
             }
             _ = ticker.tick() => {
-                if cfg.oscillator_detection_enabled {
-                    let mut drained = 0usize;
-                    while drained < cfg.oscillator_promote_max_per_tick {
-                        match promote_rx.try_recv() {
-                            Ok(req) => {
-                                world.promote_oscillator(req.coord, req.period);
-                                drained += 1;
-                            }
-                            Err(_) => break,
+                let mut drained = 0usize;
+                while drained < cfg.oscillator_promote_max_per_tick {
+                    match promote_rx.try_recv() {
+                        Ok(req) => {
+                            world.promote_oscillator(req.coord, req.period);
+                            drained += 1;
                         }
+                        Err(_) => break,
                     }
                 }
                 let start = Instant::now();
                 world.tick_into(&mut outcome);
-                if cfg.oscillator_detection_enabled && !outcome.hash_reports.is_empty() {
+                if !outcome.hash_reports.is_empty() {
                     let mut batch = Vec::with_capacity(outcome.hash_reports.len());
                     batch.extend(outcome.hash_reports.drain(..));
                     let _ = hash_tx.try_send(batch);
