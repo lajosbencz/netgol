@@ -464,4 +464,129 @@ mod tests {
     fn total_live(w: &World) -> u32 {
         w.iter_chunks().map(|(_, c)| c.live_count()).sum()
     }
+
+    fn place_blinker(w: &mut World, ox: i64, oy: i64) {
+        for &(x, y) in &[(0, 1), (1, 1), (2, 1)] {
+            w.set_cell(ox + x, oy + y, true);
+        }
+    }
+
+    fn run_until_promoted(
+        w: &mut World,
+        det: &mut crate::oscillator::Detector,
+        coord: ChunkCoord,
+        max_ticks: u64,
+    ) -> u8 {
+        let mut outcome = TickOutcome::default();
+        let mut promote_buf = Vec::new();
+        for _ in 0..max_ticks {
+            w.tick_into(&mut outcome);
+            for r in outcome.hash_reports.drain(..) {
+                det.observe(r);
+            }
+            promote_buf.clear();
+            det.scan(64, &mut promote_buf);
+            for req in promote_buf.drain(..) {
+                if req.coord == coord && w.promote_oscillator(req.coord, req.period) {
+                    return req.period;
+                }
+            }
+            if w.is_oscillating(coord) {
+                return 0;
+            }
+        }
+        panic!("chunk not promoted within {max_ticks} ticks");
+    }
+
+    #[test]
+    fn blinker_is_paused_after_detection() {
+        let mut w = World::new();
+        place_blinker(&mut w, 5, 5);
+        let mut det = crate::oscillator::Detector::new();
+        let period = run_until_promoted(&mut w, &mut det, (0, 0), 200);
+        assert_eq!(period, 2, "blinker should be detected as period-2");
+        assert!(w.is_oscillating((0, 0)));
+        assert!(w.get_chunk(0, 0).is_some(), "paused chunk still visible via get_chunk");
+        let live_before = total_live(&w);
+        let mut outcome = TickOutcome::default();
+        for _ in 0..50 {
+            w.tick_into(&mut outcome);
+            assert!(outcome.changed.is_empty(), "paused chunk emitted a change event");
+        }
+        assert!(w.is_oscillating((0, 0)));
+        assert_eq!(total_live(&w), live_before);
+    }
+
+    #[test]
+    fn block_is_paused_as_period_one() {
+        let mut w = World::new();
+        for &(x, y) in &[(2, 2), (3, 2), (2, 3), (3, 3)] {
+            w.set_cell(x, y, true);
+        }
+        let mut det = crate::oscillator::Detector::new();
+        let period = run_until_promoted(&mut w, &mut det, (0, 0), 200);
+        assert_eq!(period, 1, "block (still life) should be period 1");
+        assert!(w.is_oscillating((0, 0)));
+    }
+
+    #[test]
+    fn paused_blinker_woken_by_glider_matches_plain_run() {
+        // Two parallel worlds: one with detection, one without. Same starting
+        // state - blinker in (0,0), glider entering from a neighbor chunk.
+        // After all ticks both worlds must hold identical live cells.
+        let mut paused = World::new();
+        let mut plain = World::new();
+        place_blinker(&mut paused, 5, 5);
+        place_blinker(&mut plain, 5, 5);
+        // Glider in chunk (-1, 0), heading southeast toward (0, 0).
+        let glider_origin = (-(CHUNK_SIZE as i64) + 50, 30);
+        for &(x, y) in &[(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)] {
+            paused.set_cell(glider_origin.0 + x, glider_origin.1 + y, true);
+            plain.set_cell(glider_origin.0 + x, glider_origin.1 + y, true);
+        }
+        let mut det = crate::oscillator::Detector::new();
+        run_until_promoted(&mut paused, &mut det, (0, 0), 50);
+        assert!(paused.is_oscillating((0, 0)));
+        let mut outcome = TickOutcome::default();
+        let plain_target_tick = paused.tick_number() + 100;
+        while plain.tick_number() < plain_target_tick {
+            plain.tick();
+        }
+        for _ in 0..100 {
+            paused.tick_into(&mut outcome);
+            for r in outcome.hash_reports.drain(..) {
+                det.observe(r);
+            }
+        }
+        assert_eq!(paused.tick_number(), plain.tick_number());
+        assert_eq!(collect_live(&paused), collect_live(&plain), "paused/plain diverged");
+    }
+
+    #[test]
+    fn edit_wakes_paused_chunk() {
+        let mut w = World::new();
+        place_blinker(&mut w, 5, 5);
+        let mut det = crate::oscillator::Detector::new();
+        run_until_promoted(&mut w, &mut det, (0, 0), 200);
+        assert!(w.is_oscillating((0, 0)));
+        assert!(w.wake_if_paused((0, 0)));
+        assert!(!w.is_oscillating((0, 0)));
+        assert!(w.get_chunk(0, 0).is_some());
+        let pre_edit = collect_live(&w);
+        w.set_cell(10, 10, true);
+        let post_edit = collect_live(&w);
+        assert_eq!(post_edit.len(), pre_edit.len() + 1);
+    }
+
+    #[test]
+    fn remove_chunk_drops_oscillator_entry() {
+        let mut w = World::new();
+        place_blinker(&mut w, 5, 5);
+        let mut det = crate::oscillator::Detector::new();
+        run_until_promoted(&mut w, &mut det, (0, 0), 200);
+        assert!(w.is_oscillating((0, 0)));
+        assert!(w.remove_chunk((0, 0)));
+        assert!(!w.is_oscillating((0, 0)));
+        assert!(w.get_chunk(0, 0).is_none());
+    }
 }

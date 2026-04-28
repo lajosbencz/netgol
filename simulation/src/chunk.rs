@@ -526,6 +526,26 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     #[test]
+    fn avx2_is_empty_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut rng = Xs(0xfeed_face_dead_beef);
+        for _ in 0..64 {
+            let mut rows = [0u64; CHUNK_SIZE];
+            if rng.next() & 1 == 1 {
+                let idx = (rng.next() as usize) % CHUNK_SIZE;
+                let bit = rng.next() & ROW_MASK;
+                if bit != 0 { rows[idx] = bit; }
+            }
+            let scalar = rows.iter().all(|r| *r == 0);
+            let avx2 = unsafe { is_empty_avx2(&rows) };
+            assert_eq!(scalar, avx2, "is_empty disagrees on rows {:?}", rows);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
     fn avx2_matches_scalar_random() {
         if !std::is_x86_feature_detected!("avx2") {
             return;
