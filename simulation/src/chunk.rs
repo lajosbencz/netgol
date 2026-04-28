@@ -69,6 +69,18 @@ impl Chunk {
         self.rows.iter().map(|r| r.count_ones()).sum()
     }
 
+    /// 64-bit multiply-mix over the row bits. Non-cryptographic; intended for
+    /// cycle-detection identity checks where two equal `rows` must hash equal.
+    pub fn hash_state(&self) -> u64 {
+        let mut h: u64 = 0x9E37_79B9_7F4A_7C15;
+        for &r in &self.rows {
+            h ^= r;
+            h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            h ^= h >> 32;
+        }
+        h
+    }
+
     pub fn is_empty(&self) -> bool {
         #[cfg(feature = "avx2")]
         // SAFETY: `avx2` feature is a build-time promise of AVX2 support.
