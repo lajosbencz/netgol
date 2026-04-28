@@ -3,9 +3,6 @@
 use crate::CHUNK_SIZE;
 use std::sync::Arc;
 
-#[cfg(all(feature = "avx2", not(target_arch = "x86_64")))]
-compile_error!("feature `avx2` requires target_arch = \"x86_64\"");
-
 const LAST_BIT: usize = CHUNK_SIZE - 1;
 const ROW_MASK: u64 = if CHUNK_SIZE == 64 {
     u64::MAX
@@ -102,10 +99,10 @@ impl Chunk {
     }
 
     pub fn is_empty(&self) -> bool {
-        #[cfg(feature = "avx2")]
-        // SAFETY: `avx2` feature is a build-time promise of AVX2 support.
+        #[cfg(target_feature = "avx2")]
+        // SAFETY: `target_feature = "avx2"` is a build-time promise of AVX2 support.
         unsafe { return is_empty_avx2(&self.rows); }
-        #[cfg(not(feature = "avx2"))]
+        #[cfg(not(target_feature = "avx2"))]
         self.rows.iter().all(|r| *r == 0)
     }
 
@@ -182,10 +179,10 @@ impl Chunk {
             return StepResult::Unchanged;
         }
         let mut out_rows = [0u64; CHUNK_SIZE];
-        #[cfg(feature = "avx2")]
-        // SAFETY: `avx2` feature is a build-time promise of AVX2 support.
+        #[cfg(target_feature = "avx2")]
+        // SAFETY: `target_feature = "avx2"` is a build-time promise of AVX2 support.
         unsafe { kernel_avx2(&self.rows, halo, &mut out_rows) };
-        #[cfg(not(feature = "avx2"))]
+        #[cfg(not(target_feature = "avx2"))]
         kernel_scalar(&self.rows, halo, &mut out_rows);
 
         let mut out = Chunk {
@@ -203,7 +200,7 @@ impl Chunk {
     }
 }
 
-#[cfg_attr(feature = "avx2", allow(dead_code))]
+#[cfg_attr(target_feature = "avx2", allow(dead_code))]
 fn kernel_scalar(rows: &[u64; CHUNK_SIZE], halo: &EdgeBundle, out_rows: &mut [u64; CHUNK_SIZE]) {
     let row_at = |y: i32| -> u64 {
         if y < 0 {
@@ -263,7 +260,7 @@ fn kernel_scalar(rows: &[u64; CHUNK_SIZE], halo: &EdgeBundle, out_rows: &mut [u6
 }
 
 #[cfg(target_arch = "x86_64")]
-#[cfg_attr(not(any(feature = "avx2", test)), allow(dead_code))]
+#[cfg_attr(not(any(target_feature = "avx2", test)), allow(dead_code))]
 #[target_feature(enable = "avx2")]
 unsafe fn is_empty_avx2(rows: &[u64; CHUNK_SIZE]) -> bool {
     use std::arch::x86_64::*;
@@ -277,7 +274,7 @@ unsafe fn is_empty_avx2(rows: &[u64; CHUNK_SIZE]) -> bool {
     _mm256_testz_si256(acc, acc) != 0
 }
 
-#[cfg_attr(not(any(feature = "avx2", test)), allow(dead_code))]
+#[cfg_attr(not(any(target_feature = "avx2", test)), allow(dead_code))]
 #[target_feature(enable = "avx2")]
 unsafe fn kernel_avx2(
     rows: &[u64; CHUNK_SIZE],

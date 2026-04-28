@@ -20,8 +20,9 @@ pan, zoom, and edit in real time.
   its 8 shifted neighbors; one tick across a packed 64x64 chunk is a handful
   of `u64` ops.
 - **AVX2 step path.** The same cascade in 256-bit lanes, 4 rows per iteration.
-  Cargo feature `avx2` - compile-time switch, no runtime detection. The amd64
-  server image ships with it on.
+  Selected automatically when the build target includes AVX2; the production
+  image inherits `target-cpu=x86-64-v3` from `.cargo/config.toml` and gets the
+  AVX2 path with no extra flags. Other targets use the scalar fallback.
 - **Edge-aware expansion.** A neighbor chunk is stepped only if the live
   chunk's relevant edge has cells that could birth into it. Work scales with
   *active* cells, not world size.

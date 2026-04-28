@@ -9,23 +9,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 ARG TARGET=x86_64-unknown-linux-musl
-# AMD64 default: AVX2 step kernel + x86-64-v3 baseline (Haswell+/Excavator+).
-# ARM64 / non-AVX2 builds must override both ARGs to empty strings.
-ARG FEATURES=avx2
-ARG RUSTFLAGS="-C target-cpu=x86-64-v3"
-ENV RUSTFLAGS=$RUSTFLAGS
+# x86_64 Linux builds inherit `-C target-cpu=x86-64-v3` (AVX2/BMI/FMA baseline)
+# from .cargo/config.toml. The AVX2 step kernel is selected automatically via
+# `cfg(target_feature = "avx2")`. ARM64 / non-AVX2 builds use the scalar path.
 
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
+COPY .cargo      .cargo
 RUN rustup target add $TARGET
-COPY simulation simulation
-COPY protocol   protocol
-COPY server     server
+COPY simulation  simulation
+COPY protocol    protocol
+COPY server      server
 
 # Cache mounts hold the cargo registry and the target dir across builds; copy
 # the binary out before the RUN ends since the mounts unmount after.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=lazos-registry \
     --mount=type=cache,target=/build/target,id=lazos-target-${TARGET} \
-    cargo build --release --target $TARGET ${FEATURES:+--features $FEATURES} -p server \
+    cargo build --release --target $TARGET -p server \
  && strip target/$TARGET/release/lazos-server \
  && cp target/$TARGET/release/lazos-server /lazos-server
 
