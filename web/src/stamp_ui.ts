@@ -23,7 +23,7 @@ export class StampUi {
     }
 
     this.el.innerHTML =
-      `<header><span class="dot magenta"></span><span>stamps</span></header>` +
+      `<header><i class="icon" data-lucide="shapes"></i><span>stamps</span></header>` +
       `<div class="body"></div>`;
     const body = this.el.querySelector('.body') as HTMLElement;
 

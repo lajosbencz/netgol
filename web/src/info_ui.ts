@@ -13,7 +13,7 @@ const HINTS: ReadonlyArray<string> = [
 export class InfoUi {
   constructor(el: HTMLElement) {
     el.innerHTML =
-      `<header><span class="dot blue"></span><span>info</span></header>` +
+      `<header><i class="icon" data-lucide="info"></i><span>info</span></header>` +
       `<div class="body">${HINTS.map((h) => `<div>${h}</div>`).join('')}</div>`;
     makeCollapsible(el);
   }

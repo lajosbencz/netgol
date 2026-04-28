@@ -10,6 +10,7 @@ import { StampUi } from './stamp_ui';
 import { StampState } from './stamp_state';
 import { InfoUi } from './info_ui';
 import { applyUrlToCamera, UrlSync } from './url_sync';
+import { mountIcons } from './icons';
 
 const styles = getComputedStyle(document.documentElement);
 const cssVar = (name: string, fallback: string) =>
@@ -138,6 +139,7 @@ const onSettle = () => {
 };
 const controls = createControls(canvas, cam, send, scheduleFrame, onSettle, selection, cache, stampState);
 new StampUi(stampsEl, stampState);
+mountIcons();
 selection.onChange(scheduleFrame);
 stampState.onChange(scheduleFrame);
 

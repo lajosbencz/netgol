@@ -64,8 +64,10 @@
       .dot.green { background: var(--status-ok); }
       .dot.orange { background: var(--status-warn); }
       .dot.red { background: var(--status-err); }
-      .dot.blue { background: var(--status-info); }
-      .dot.magenta { background: var(--status-stamp); }
+
+      svg.icon { width: 14px; height: 14px; flex: none; color: var(--hud); }
+      #info > header svg.icon { color: var(--status-info); }
+      #stamps > header svg.icon { color: var(--status-stamp); }
 
       #stats .body span.value { color: var(--panel-fg); }
       #stats .body div { white-space: pre; }
@@ -119,6 +121,23 @@
         cursor: pointer;
       }
       #fab button:active { background: rgba(255, 255, 255, 0.08); }
+
+      #source {
+        bottom: 8px;
+        left: 8px;
+        min-width: 0;
+        padding: 6px 10px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--hud);
+        text-decoration: none;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      #source:hover { color: var(--panel-fg); }
+      #source svg.icon { width: 14px; height: 14px; color: inherit; }
     </style>
   </head>
   <body>
@@ -126,6 +145,7 @@
     <div id="stats" class="panel collapsed"></div>
     <div id="stamps" class="panel collapsed"></div>
     <div id="info" class="panel collapsed"></div>
+    <a id="source" class="panel" href="https://github.com/lajosbencz/netgol" target="_blank" rel="noopener" aria-label="Source on GitHub"><i class="icon" data-lucide="code-xml"></i><span>source</span></a>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
