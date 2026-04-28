@@ -101,6 +101,7 @@ async fn run(
     let mut edit_touched: HashSet<ChunkCoord> = HashSet::new();
     let mut outcome = TickOutcome::default();
     let mut dedup_scratch: HashSet<ChunkCoord> = HashSet::new();
+    let mut last_overrun_warn: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -153,6 +154,23 @@ async fn run(
             _ = ticker.tick() => {
                 let start = Instant::now();
                 world.tick_into(&mut outcome);
+                let elapsed = start.elapsed();
+                if elapsed > period {
+                    let now_real = Instant::now();
+                    let throttle = match last_overrun_warn {
+                        Some(t) => now_real.duration_since(t) >= Duration::from_secs(1),
+                        None => true,
+                    };
+                    if throttle {
+                        last_overrun_warn = Some(now_real);
+                        tracing::warn!(
+                            tick = world.tick_number(),
+                            compute_ms = elapsed.as_millis() as u64,
+                            budget_ms = period.as_millis() as u64,
+                            "tick overran budget; sim frequency dropping",
+                        );
+                    }
+                }
                 if !edit_touched.is_empty() {
                     dedup_scratch.clear();
                     dedup_scratch.extend(outcome.changed.iter().copied());
@@ -173,7 +191,7 @@ async fn run(
                         changed,
                         removed,
                         live_count: world.len(),
-                        compute_duration: start.elapsed(),
+                        compute_duration: elapsed,
                         initial: false,
                     })
                     .await
