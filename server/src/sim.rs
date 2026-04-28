@@ -7,6 +7,7 @@
 
 use crate::config::Config;
 use crate::io_task::IoCmd;
+use crate::metrics::Metrics;
 use protocol::{rows_to_bits, EditCell, BITS_BYTES};
 use simulation::{ChunkCoord, Detector, PromoteRequest, TickOutcome, World, CHUNK_SIZE_I64};
 use std::collections::HashSet;
@@ -56,7 +57,12 @@ const SIM_EVENT_CAPACITY: usize = 256;
 /// Promote requests queued back from detector to sim.
 const PROMOTE_CAPACITY: usize = 1024;
 
-pub fn spawn(cfg: Config, world: World, io_tx: mpsc::Sender<IoCmd>) -> SimHandles {
+pub fn spawn(
+    cfg: Config,
+    world: World,
+    io_tx: mpsc::Sender<IoCmd>,
+    metrics: Arc<Metrics>,
+) -> SimHandles {
     let (cmd_tx, cmd_rx) = mpsc::channel(1024);
     let (event_tx, event_rx) = mpsc::channel(SIM_EVENT_CAPACITY);
     let (promote_tx, promote_rx) = mpsc::channel::<PromoteRequest>(PROMOTE_CAPACITY);
@@ -66,7 +72,7 @@ pub fn spawn(cfg: Config, world: World, io_tx: mpsc::Sender<IoCmd>) -> SimHandle
     let budget = cfg.oscillator_detection_max_chunks_per_step;
     tokio::spawn(detector_run(Arc::clone(&detector), promote_tx, interval_ms, budget));
 
-    tokio::spawn(run(cfg, world, cmd_rx, event_tx, io_tx, detector, promote_rx));
+    tokio::spawn(run(cfg, world, cmd_rx, event_tx, io_tx, detector, promote_rx, metrics));
     SimHandles { cmd_tx, event_rx }
 }
 
@@ -102,6 +108,7 @@ async fn run(
     io_tx: mpsc::Sender<IoCmd>,
     detector: Arc<Mutex<Detector>>,
     mut promote_rx: mpsc::Receiver<PromoteRequest>,
+    metrics: Arc<Metrics>,
 ) {
     let snapshot_interval_ticks = cfg.snapshot_interval_ticks;
     let mut next_snapshot_tick = world.tick_number() + snapshot_interval_ticks;
@@ -146,12 +153,18 @@ async fn run(
                 let Some(cmd) = cmd else { return };
                 match cmd {
                     SimCmd::Edit(cells) => {
+                        let mut wakes = 0u64;
                         {
                             let mut det = detector.lock().expect("detector mutex poisoned");
                             for c in &cells {
-                                world.wake_if_paused((c.cx, c.cy));
+                                if world.wake_if_paused((c.cx, c.cy)) {
+                                    wakes += 1;
+                                }
                                 det.forget((c.cx, c.cy));
                             }
+                        }
+                        if wakes > 0 {
+                            metrics.oscillator_wakes_total.inc_by(wakes);
                         }
                         for c in &cells {
                             let ax = i64::from(c.cx) * CHUNK_SIZE_I64 + i64::from(c.lx);
@@ -203,6 +216,7 @@ async fn run(
                             }
                         }
                         if !woken.is_empty() {
+                            metrics.oscillator_wakes_total.inc_by(woken.len() as u64);
                             let hint = woken.len();
                             let snaps = collect(&world, woken.into_iter(), hint);
                             let now_tick = world.tick_number();
@@ -223,22 +237,37 @@ async fn run(
             }
             _ = ticker.tick() => {
                 let mut drained = 0usize;
+                let mut promotions = 0u64;
                 while drained < cfg.oscillator_promote_max_per_tick {
                     match promote_rx.try_recv() {
                         Ok(req) => {
-                            world.promote_oscillator(req.coord, req.period);
+                            if world.promote_oscillator(req.coord, req.period) {
+                                promotions += 1;
+                            }
                             drained += 1;
                         }
                         Err(_) => break,
                     }
                 }
+                if promotions > 0 {
+                    metrics.oscillator_promotions_total.inc_by(promotions);
+                }
                 let start = Instant::now();
                 world.tick_into(&mut outcome);
                 if !outcome.hash_reports.is_empty() {
-                    let mut det = detector.lock().expect("detector mutex poisoned");
-                    for r in outcome.hash_reports.drain(..) {
-                        det.observe(r);
+                    let tracked;
+                    {
+                        let mut det = detector.lock().expect("detector mutex poisoned");
+                        for r in outcome.hash_reports.drain(..) {
+                            det.observe(r);
+                        }
+                        tracked = det.len();
                     }
+                    metrics.oscillator_tracked.set(tracked as i64);
+                }
+                metrics.oscillator_chunks.set(world.oscillator_count() as i64);
+                if outcome.perturbation_wakes > 0 {
+                    metrics.oscillator_wakes_total.inc_by(u64::from(outcome.perturbation_wakes));
                 }
                 let elapsed = start.elapsed();
                 if elapsed > period {

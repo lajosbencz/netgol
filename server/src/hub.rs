@@ -234,6 +234,7 @@ impl Hub {
     }
 
     async fn handle_sim_event(&mut self, ev: SimEvent) {
+        let fanout_start = Instant::now();
         let now = ev.tick;
         self.latest_tick = now;
         let bytes_at_start = self.metrics.bytes_sent_total.get();
@@ -375,6 +376,7 @@ impl Hub {
             let msgs_delta = self.metrics.messages_sent_total.get().saturating_sub(msgs_at_start);
             self.metrics.broadcast_bytes_per_tick.observe(bytes_delta as f64);
             self.metrics.broadcast_messages_per_tick.observe(msgs_delta as f64);
+            self.metrics.hub_fanout_seconds.observe(fanout_start.elapsed().as_secs_f64());
         }
     }
 

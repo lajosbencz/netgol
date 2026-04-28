@@ -56,6 +56,8 @@ pub struct TickOutcome {
     pub changed: Vec<ChunkCoord>,
     pub removed: Vec<ChunkCoord>,
     pub hash_reports: Vec<HashReport>,
+    /// Paused chunks woken by neighbor perturbation during this tick.
+    pub perturbation_wakes: u32,
 }
 
 impl World {
@@ -211,6 +213,7 @@ impl World {
         outcome.changed.clear();
         outcome.removed.clear();
         outcome.hash_reports.clear();
+        outcome.perturbation_wakes = 0;
         self.scratch_edges.clear();
         self.scratch_candidates.clear();
         self.scratch_candidates_vec.clear();
@@ -249,6 +252,7 @@ impl World {
                 self.scratch_edges.insert(coord, chunk.edges());
                 self.chunks.insert(coord, chunk);
                 outcome.changed.push(coord);
+                outcome.perturbation_wakes += 1;
             }
         }
 

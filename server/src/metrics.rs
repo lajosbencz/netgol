@@ -44,6 +44,15 @@ pub struct Metrics {
     pub wal_fsync_seconds: Histogram,
     pub snapshot_seconds: Histogram,
     pub snapshot_bytes: IntGauge,
+
+    // Oscillator detection.
+    pub oscillator_chunks: IntGauge,
+    pub oscillator_tracked: IntGauge,
+    pub oscillator_promotions_total: IntCounter,
+    pub oscillator_wakes_total: IntCounter,
+
+    // Hub.
+    pub hub_fanout_seconds: Histogram,
 }
 
 impl Metrics {
@@ -174,6 +183,29 @@ impl Metrics {
         );
         let snapshot_bytes = int_gauge!("lazos_snapshot_bytes", "Size in bytes of the most recent snapshot");
 
+        let oscillator_chunks = int_gauge!(
+            "lazos_oscillator_chunks",
+            "Chunks currently paused as detected oscillators"
+        );
+        let oscillator_tracked = int_gauge!(
+            "lazos_oscillator_tracked",
+            "Chunks held in the detector ring buffer (active observation set)"
+        );
+        let oscillator_promotions_total = counter!(
+            "lazos_oscillator_promotions_total",
+            "Successful pause-and-promote operations"
+        );
+        let oscillator_wakes_total = counter!(
+            "lazos_oscillator_wakes_total",
+            "Paused chunks woken (any cause: perturbation, edit, subscribe)"
+        );
+
+        let hub_fanout_seconds = histogram!(
+            "lazos_hub_fanout_seconds",
+            "Wall time the hub spent fanning out a tick's events to peers",
+            TICK_BUCKETS
+        );
+
         Arc::new(Self {
             registry,
             live_chunks,
@@ -194,6 +226,11 @@ impl Metrics {
             wal_fsync_seconds,
             snapshot_seconds,
             snapshot_bytes,
+            oscillator_chunks,
+            oscillator_tracked,
+            oscillator_promotions_total,
+            oscillator_wakes_total,
+            hub_fanout_seconds,
         })
     }
 

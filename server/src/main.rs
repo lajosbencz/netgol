@@ -46,7 +46,7 @@ async fn main() {
 
     let metrics = metrics::Metrics::new();
     let io_handles = io_task::spawn(cfg.snapshot_path.clone(), chunk_size_u8, metrics.clone());
-    let sim_handles = sim::spawn(cfg.clone(), world, io_handles.tx);
+    let sim_handles = sim::spawn(cfg.clone(), world, io_handles.tx, metrics.clone());
     let hub_tx = hub::spawn(cfg.clone(), sim_handles.cmd_tx, sim_handles.event_rx, regions, metrics.clone());
 
     // Metrics server.
