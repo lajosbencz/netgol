@@ -8,8 +8,9 @@
 use crate::config::Config;
 use crate::io_task::IoCmd;
 use protocol::{rows_to_bits, EditCell, BITS_BYTES};
-use simulation::{ChunkCoord, Detector, HashReport, PromoteRequest, TickOutcome, World, CHUNK_SIZE_I64};
+use simulation::{ChunkCoord, Detector, PromoteRequest, TickOutcome, World, CHUNK_SIZE_I64};
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
@@ -52,52 +53,42 @@ pub struct SimHandles {
 /// Bounded so a stalled hub fails loud (channel full → sim panics) instead of
 /// quietly accumulating events forever. 256 slots = ~25s of headroom at 10 Hz.
 const SIM_EVENT_CAPACITY: usize = 256;
-/// Hash-report batches buffered toward the detector. On overflow the sim drops
-/// the batch (best-effort detection) rather than blocking the tick.
-const HASH_BATCH_CAPACITY: usize = 16;
 /// Promote requests queued back from detector to sim.
 const PROMOTE_CAPACITY: usize = 1024;
 
 pub fn spawn(cfg: Config, world: World, io_tx: mpsc::Sender<IoCmd>) -> SimHandles {
     let (cmd_tx, cmd_rx) = mpsc::channel(1024);
     let (event_tx, event_rx) = mpsc::channel(SIM_EVENT_CAPACITY);
-    let (hash_tx, hash_rx) = mpsc::channel::<Vec<HashReport>>(HASH_BATCH_CAPACITY);
     let (promote_tx, promote_rx) = mpsc::channel::<PromoteRequest>(PROMOTE_CAPACITY);
 
+    let detector = Arc::new(Mutex::new(Detector::new()));
     let interval_ms = cfg.oscillator_detection_interval_ms;
     let budget = cfg.oscillator_detection_max_chunks_per_step;
-    tokio::spawn(detector_run(hash_rx, promote_tx, interval_ms, budget));
+    tokio::spawn(detector_run(Arc::clone(&detector), promote_tx, interval_ms, budget));
 
-    tokio::spawn(run(cfg, world, cmd_rx, event_tx, io_tx, hash_tx, promote_rx));
+    tokio::spawn(run(cfg, world, cmd_rx, event_tx, io_tx, detector, promote_rx));
     SimHandles { cmd_tx, event_rx }
 }
 
 async fn detector_run(
-    mut hash_rx: mpsc::Receiver<Vec<HashReport>>,
+    detector: Arc<Mutex<Detector>>,
     promote_tx: mpsc::Sender<PromoteRequest>,
     interval_ms: u64,
     budget: usize,
 ) {
-    let mut detector = Detector::new();
     let mut promote_buf: Vec<PromoteRequest> = Vec::with_capacity(budget);
     let mut scan = interval(Duration::from_millis(interval_ms.max(1)));
     scan.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        tokio::select! {
-            batch = hash_rx.recv() => {
-                let Some(batch) = batch else { return };
-                for r in batch {
-                    detector.observe(r);
-                }
-            }
-            _ = scan.tick() => {
-                promote_buf.clear();
-                detector.scan(budget, &mut promote_buf);
-                for req in promote_buf.drain(..) {
-                    if promote_tx.send(req).await.is_err() {
-                        return;
-                    }
-                }
+        scan.tick().await;
+        promote_buf.clear();
+        {
+            let mut det = detector.lock().expect("detector mutex poisoned");
+            det.scan(budget, &mut promote_buf);
+        }
+        for req in promote_buf.drain(..) {
+            if promote_tx.send(req).await.is_err() {
+                return;
             }
         }
     }
@@ -109,7 +100,7 @@ async fn run(
     mut cmd_rx: mpsc::Receiver<SimCmd>,
     event_tx: mpsc::Sender<SimEvent>,
     io_tx: mpsc::Sender<IoCmd>,
-    hash_tx: mpsc::Sender<Vec<HashReport>>,
+    detector: Arc<Mutex<Detector>>,
     mut promote_rx: mpsc::Receiver<PromoteRequest>,
 ) {
     let snapshot_interval_ticks = cfg.snapshot_interval_ticks;
@@ -155,8 +146,12 @@ async fn run(
                 let Some(cmd) = cmd else { return };
                 match cmd {
                     SimCmd::Edit(cells) => {
-                        for c in &cells {
-                            world.wake_if_paused((c.cx, c.cy));
+                        {
+                            let mut det = detector.lock().expect("detector mutex poisoned");
+                            for c in &cells {
+                                world.wake_if_paused((c.cx, c.cy));
+                                det.forget((c.cx, c.cy));
+                            }
                         }
                         for c in &cells {
                             let ax = i64::from(c.cx) * CHUNK_SIZE_I64 + i64::from(c.lx);
@@ -194,8 +189,10 @@ async fn run(
                     SimCmd::Reap(coords) => {
                         // Hub already broadcast `Reaped` to peers before sending
                         // this; no SimEvent needed.
+                        let mut det = detector.lock().expect("detector mutex poisoned");
                         for coord in coords {
                             world.remove_chunk(coord);
+                            det.forget(coord);
                         }
                     }
                     SimCmd::WakeIfPaused(coords) => {
@@ -238,9 +235,10 @@ async fn run(
                 let start = Instant::now();
                 world.tick_into(&mut outcome);
                 if !outcome.hash_reports.is_empty() {
-                    let mut batch = Vec::with_capacity(outcome.hash_reports.len());
-                    batch.extend(outcome.hash_reports.drain(..));
-                    let _ = hash_tx.try_send(batch);
+                    let mut det = detector.lock().expect("detector mutex poisoned");
+                    for r in outcome.hash_reports.drain(..) {
+                        det.observe(r);
+                    }
                 }
                 let elapsed = start.elapsed();
                 if elapsed > period {
