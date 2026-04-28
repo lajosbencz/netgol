@@ -11,6 +11,7 @@ import { StampState } from './stamp_state';
 import { InfoUi } from './info_ui';
 import { applyUrlToCamera, UrlSync } from './url_sync';
 import { mountIcons } from './icons';
+import { Links } from './links';
 
 const styles = getComputedStyle(document.documentElement);
 const cssVar = (name: string, fallback: string) =>
@@ -31,6 +32,7 @@ const canvas = document.getElementById('canvas') as HTMLCanvasElement;
 const statsEl = document.getElementById('stats') as HTMLElement;
 const stampsEl = document.getElementById('stamps') as HTMLElement;
 const infoEl = document.getElementById('info') as HTMLElement;
+const linksEl = document.getElementById('links') as HTMLElement;
 
 const cam: Camera = { x: 0, y: 0, zoom: 3 };
 applyUrlToCamera(cam);
@@ -139,6 +141,7 @@ const onSettle = () => {
 };
 const controls = createControls(canvas, cam, send, scheduleFrame, onSettle, selection, cache, stampState);
 new StampUi(stampsEl, stampState);
+new Links(linksEl);
 mountIcons();
 selection.onChange(scheduleFrame);
 stampState.onChange(scheduleFrame);

@@ -1,5 +1,5 @@
-import { createIcons, CodeXml, Info, Shapes } from 'lucide';
+import { createIcons, BookOpen, CodeXml, Info, Shapes } from 'lucide';
 
 export function mountIcons() {
-  createIcons({ icons: { CodeXml, Info, Shapes } });
+  createIcons({ icons: { BookOpen, CodeXml, Info, Shapes } });
 }
