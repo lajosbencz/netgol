@@ -10,6 +10,8 @@ use crate::world::CoordHasher;
 
 pub const MAX_PERIOD: usize = 5;
 const HISTORY: usize = MAX_PERIOD * 3;
+const _: () = assert!(MAX_PERIOD <= u8::MAX as usize, "period stored as u8");
+const _: () = assert!(HISTORY <= u8::MAX as usize, "head/filled stored as u8");
 
 #[derive(Debug, Clone)]
 pub struct Oscillator {

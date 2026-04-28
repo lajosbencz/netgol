@@ -339,7 +339,7 @@ fn split(x: i64, y: i64) -> (ChunkCoord, usize, usize) {
 
 fn wake_chunk(osc: Oscillator, current_tick: u64) -> Chunk {
     let skipped = current_tick.saturating_sub(osc.paused_at_tick);
-    let phase_offset = (skipped % osc.period as u64) as u32;
+    let phase_offset = (skipped % u64::from(osc.period)) as u8;
     let mut chunk = osc.chunk;
     let empty = EdgeBundle::empty();
     for _ in 0..phase_offset {

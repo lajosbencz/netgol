@@ -12,6 +12,17 @@ const ROW_MASK: u64 = if CHUNK_SIZE == 64 {
 } else {
     (1u64 << CHUNK_SIZE) - 1
 };
+const ROW_BYTES: usize = std::mem::size_of::<u64>();
+const AVX2_LANE_BYTES: usize = 32;
+const AVX2_LANE_ROWS: usize = AVX2_LANE_BYTES / ROW_BYTES;
+const AVX2_LANES_PER_CHUNK: usize = (CHUNK_SIZE * ROW_BYTES) / AVX2_LANE_BYTES;
+const _: () = assert!(
+    CHUNK_SIZE % AVX2_LANE_ROWS == 0,
+    "AVX2 kernels process whole 4-row lanes",
+);
+const _: () = assert!(CHUNK_SIZE <= 64, "row stored as u64");
+
+const HASH_MIX_K: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// One row per `u64`; bit `x` of `rows[y]` = cell at `(x, y)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,11 +83,11 @@ impl Chunk {
     /// 64-bit multiply-mix over the row bits. Non-cryptographic; intended for
     /// cycle-detection identity checks where two equal `rows` must hash equal.
     pub fn hash_state(&self) -> u64 {
-        let mut h: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut h: u64 = HASH_MIX_K;
         for &r in &self.rows {
             h ^= r;
-            h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            h ^= h >> 32;
+            h = h.wrapping_mul(HASH_MIX_K);
+            h ^= h >> (u64::BITS / 2);
         }
         h
     }
@@ -250,8 +261,8 @@ unsafe fn is_empty_avx2(rows: &[u64; CHUNK_SIZE]) -> bool {
     let p = rows.as_ptr().cast::<__m256i>();
     let mut acc = _mm256_loadu_si256(p);
     let mut i = 1usize;
-    while i < CHUNK_SIZE * 8 / 32 {
-        acc = _mm256_or_si256(acc, _mm256_loadu_si256(p.byte_add(i * 32)));
+    while i < AVX2_LANES_PER_CHUNK {
+        acc = _mm256_or_si256(acc, _mm256_loadu_si256(p.byte_add(i * AVX2_LANE_BYTES)));
         i += 1;
     }
     _mm256_testz_si256(acc, acc) != 0
@@ -289,17 +300,17 @@ unsafe fn kernel_avx2(
 
     let mut y = 0usize;
     while y < CHUNK_SIZE {
-        let top = _mm256_loadu_si256(row_ptr.byte_add(y * 8));
-        let mid = _mm256_loadu_si256(row_ptr.byte_add((y + 1) * 8));
-        let bot = _mm256_loadu_si256(row_ptr.byte_add((y + 2) * 8));
+        let top = _mm256_loadu_si256(row_ptr.byte_add(y * ROW_BYTES));
+        let mid = _mm256_loadu_si256(row_ptr.byte_add((y + 1) * ROW_BYTES));
+        let bot = _mm256_loadu_si256(row_ptr.byte_add((y + 2) * ROW_BYTES));
 
-        let l_top = _mm256_loadu_si256(left_ptr.byte_add(y * 8));
-        let l_mid = _mm256_loadu_si256(left_ptr.byte_add((y + 1) * 8));
-        let l_bot = _mm256_loadu_si256(left_ptr.byte_add((y + 2) * 8));
+        let l_top = _mm256_loadu_si256(left_ptr.byte_add(y * ROW_BYTES));
+        let l_mid = _mm256_loadu_si256(left_ptr.byte_add((y + 1) * ROW_BYTES));
+        let l_bot = _mm256_loadu_si256(left_ptr.byte_add((y + 2) * ROW_BYTES));
 
-        let r_top = _mm256_slli_epi64(_mm256_loadu_si256(right_ptr.byte_add(y * 8)), LAST_BIT as i32);
-        let r_mid = _mm256_slli_epi64(_mm256_loadu_si256(right_ptr.byte_add((y + 1) * 8)), LAST_BIT as i32);
-        let r_bot = _mm256_slli_epi64(_mm256_loadu_si256(right_ptr.byte_add((y + 2) * 8)), LAST_BIT as i32);
+        let r_top = _mm256_slli_epi64(_mm256_loadu_si256(right_ptr.byte_add(y * ROW_BYTES)), LAST_BIT as i32);
+        let r_mid = _mm256_slli_epi64(_mm256_loadu_si256(right_ptr.byte_add((y + 1) * ROW_BYTES)), LAST_BIT as i32);
+        let r_bot = _mm256_slli_epi64(_mm256_loadu_si256(right_ptr.byte_add((y + 2) * ROW_BYTES)), LAST_BIT as i32);
 
         let top_l = _mm256_or_si256(_mm256_slli_epi64(top, 1), l_top);
         let top_r = _mm256_or_si256(_mm256_srli_epi64(top, 1), r_top);
@@ -327,9 +338,9 @@ unsafe fn kernel_avx2(
         let lhs = _mm256_and_si256(s1, s0_or_mid);
         let next = _mm256_andnot_si256(s3, _mm256_andnot_si256(s2, lhs));
 
-        let out_ptr = out_rows.as_mut_ptr().byte_add(y * 8).cast::<__m256i>();
+        let out_ptr = out_rows.as_mut_ptr().byte_add(y * ROW_BYTES).cast::<__m256i>();
         _mm256_storeu_si256(out_ptr, next);
-        y += 4;
+        y += AVX2_LANE_ROWS;
     }
 }
 
