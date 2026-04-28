@@ -70,6 +70,10 @@ impl Chunk {
     }
 
     pub fn is_empty(&self) -> bool {
+        #[cfg(feature = "avx2")]
+        // SAFETY: `avx2` feature is a build-time promise of AVX2 support.
+        unsafe { return is_empty_avx2(&self.rows); }
+        #[cfg(not(feature = "avx2"))]
         self.rows.iter().all(|r| *r == 0)
     }
 
@@ -227,6 +231,20 @@ fn kernel_scalar(rows: &[u64; CHUNK_SIZE], halo: &EdgeBundle, out_rows: &mut [u6
 }
 
 #[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(any(feature = "avx2", test)), allow(dead_code))]
+#[target_feature(enable = "avx2")]
+unsafe fn is_empty_avx2(rows: &[u64; CHUNK_SIZE]) -> bool {
+    use std::arch::x86_64::*;
+    let p = rows.as_ptr().cast::<__m256i>();
+    let mut acc = _mm256_loadu_si256(p);
+    let mut i = 1usize;
+    while i < CHUNK_SIZE * 8 / 32 {
+        acc = _mm256_or_si256(acc, _mm256_loadu_si256(p.byte_add(i * 32)));
+        i += 1;
+    }
+    _mm256_testz_si256(acc, acc) != 0
+}
+
 #[cfg_attr(not(any(feature = "avx2", test)), allow(dead_code))]
 #[target_feature(enable = "avx2")]
 unsafe fn kernel_avx2(
