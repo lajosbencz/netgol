@@ -64,7 +64,7 @@ pub struct World {
     scratch_edges: CoordMap<EdgeBundle>,
     scratch_candidates: CoordSet,
     scratch_candidates_vec: Vec<ChunkCoord>,
-    scratch_wakes: Vec<ChunkCoord>,
+    scratch_wakes: CoordSet,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -93,8 +93,7 @@ impl World {
         self.chunks.is_empty() && self.oscillators.is_empty() && self.groups.is_empty()
     }
 
-    pub fn get_chunk(&self, cx: i32, cy: i32) -> Option<&Chunk> {
-        let coord = (cx, cy);
+    pub fn get_chunk(&self, coord: ChunkCoord) -> Option<&Chunk> {
         self.chunks
             .get(&coord)
             .or_else(|| self.oscillators.get(&coord).map(|o| &o.chunk))
@@ -103,6 +102,31 @@ impl World {
                     .get(&coord)
                     .map(|(g, idx)| &g.members[*idx as usize].1)
             })
+    }
+
+    /// Freeze every cell in the axis-aligned rectangle at its current live
+    /// value. Batches by chunk so `Arc::make_mut` is called once per chunk
+    /// rather than once per cell.
+    pub fn freeze_rect(&mut self, x0: i64, y0: i64, w: u32, h: u32) {
+        if w == 0 || h == 0 { return; }
+        let x1 = x0 + w as i64;
+        let y1 = y0 + h as i64;
+        let cx0 = x0.div_euclid(CHUNK_SIZE_I64) as i32;
+        let cx1 = (x1 - 1).div_euclid(CHUNK_SIZE_I64) as i32;
+        let cy0 = y0.div_euclid(CHUNK_SIZE_I64) as i32;
+        let cy1 = (y1 - 1).div_euclid(CHUNK_SIZE_I64) as i32;
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                let chunk = self.chunks.entry((cx, cy)).or_insert_with(Chunk::empty);
+                let base_x = cx as i64 * CHUNK_SIZE_I64;
+                let base_y = cy as i64 * CHUNK_SIZE_I64;
+                let lx0 = (x0 - base_x).max(0) as usize;
+                let lx1 = ((x1 - base_x).min(CHUNK_SIZE_I64) - 1) as usize;
+                let ly0 = (y0 - base_y).max(0) as usize;
+                let ly1 = ((y1 - base_y).min(CHUNK_SIZE_I64) - 1) as usize;
+                chunk.freeze_rect_at_current(lx0, lx1, ly0, ly1);
+            }
+        }
     }
 
     /// Only live (non-paused) chunks. Used by group-collection to avoid including
@@ -218,28 +242,12 @@ impl World {
     }
 
     fn halo_for(&self, coord: ChunkCoord) -> EdgeBundle {
-        let (x, y) = coord;
-        let edges_of = |c: ChunkCoord| {
+        assemble_halo_with(coord, |c| {
             self.chunks.get(&c)
                 .filter(|ch| !ch.is_empty())
                 .map(|ch| ch.edges())
                 .unwrap_or_else(EdgeBundle::empty)
-        };
-        let above = edges_of((x, y - 1));
-        let below = edges_of((x, y + 1));
-        let left = edges_of((x - 1, y));
-        let right = edges_of((x + 1, y));
-        let tl = edges_of((x - 1, y - 1));
-        let tr = edges_of((x + 1, y - 1));
-        let bl = edges_of((x - 1, y + 1));
-        let br = edges_of((x + 1, y + 1));
-        EdgeBundle {
-            top: above.bottom,
-            bottom: below.top,
-            left: left.right,
-            right: right.left,
-            corners: [tl.corners[3], tr.corners[2], bl.corners[1], br.corners[0]],
-        }
+        })
     }
 
     /// Promote a cross-boundary oscillating group. `member_coords` must all be
@@ -399,12 +407,10 @@ impl World {
                     if has_bit
                         && (self.oscillators.contains_key(&c) || self.groups.contains_key(&c))
                     {
-                        self.scratch_wakes.push(c);
+                        self.scratch_wakes.insert(c);
                     }
                 }
             }
-            self.scratch_wakes.sort_unstable();
-            self.scratch_wakes.dedup();
             for &coord in &self.scratch_wakes {
                 if let Some(osc) = self.oscillators.remove(&coord) {
                     let chunk = wake_chunk(osc, self.tick);
@@ -546,24 +552,27 @@ fn wake_group(group: &OscillatorGroup, current_tick: u64) -> Vec<(ChunkCoord, Ch
     members
 }
 
-fn assemble_halo(coord: ChunkCoord, cache: &CoordMap<EdgeBundle>) -> EdgeBundle {
+fn assemble_halo_with<F: Fn(ChunkCoord) -> EdgeBundle>(coord: ChunkCoord, edges_of: F) -> EdgeBundle {
     let (x, y) = coord;
-    let empty = EdgeBundle::empty();
-    let above = cache.get(&(x, y - 1)).copied().unwrap_or(empty);
-    let below = cache.get(&(x, y + 1)).copied().unwrap_or(empty);
-    let left = cache.get(&(x - 1, y)).copied().unwrap_or(empty);
-    let right = cache.get(&(x + 1, y)).copied().unwrap_or(empty);
-    let tl = cache.get(&(x - 1, y - 1)).copied().unwrap_or(empty);
-    let tr = cache.get(&(x + 1, y - 1)).copied().unwrap_or(empty);
-    let bl = cache.get(&(x - 1, y + 1)).copied().unwrap_or(empty);
-    let br = cache.get(&(x + 1, y + 1)).copied().unwrap_or(empty);
+    let above = edges_of((x, y - 1));
+    let below = edges_of((x, y + 1));
+    let left  = edges_of((x - 1, y));
+    let right = edges_of((x + 1, y));
+    let tl    = edges_of((x - 1, y - 1));
+    let tr    = edges_of((x + 1, y - 1));
+    let bl    = edges_of((x - 1, y + 1));
+    let br    = edges_of((x + 1, y + 1));
     EdgeBundle {
-        top: above.bottom,
-        bottom: below.top,
-        left: left.right,
-        right: right.left,
+        top:     above.bottom,
+        bottom:  below.top,
+        left:    left.right,
+        right:   right.left,
         corners: [tl.corners[3], tr.corners[2], bl.corners[1], br.corners[0]],
     }
+}
+
+fn assemble_halo(coord: ChunkCoord, cache: &CoordMap<EdgeBundle>) -> EdgeBundle {
+    assemble_halo_with(coord, |c| cache.get(&c).copied().unwrap_or_else(EdgeBundle::empty))
 }
 
 #[cfg(test)]
@@ -636,7 +645,7 @@ mod tests {
         w.freeze_cell(0, 0, false);
         w.tick();
         assert_eq!(w.len(), 1);
-        assert!(w.get_chunk(0, 0).unwrap().is_frozen());
+        assert!(w.get_chunk((0, 0)).unwrap().is_frozen());
     }
 
     fn collect_live(w: &World) -> BTreeSet<(i64, i64)> {
@@ -701,7 +710,7 @@ mod tests {
         let period = run_until_promoted(&mut w, &mut det, (0, 0), 200);
         assert_eq!(period, 2, "blinker should be detected as period-2");
         assert!(w.is_oscillating((0, 0)));
-        assert!(w.get_chunk(0, 0).is_some(), "paused chunk still visible via get_chunk");
+        assert!(w.get_chunk((0, 0)).is_some(), "paused chunk still visible via get_chunk");
         let live_before = total_live(&w);
         let mut outcome = TickOutcome::default();
         for _ in 0..50 {
@@ -817,7 +826,7 @@ mod tests {
         assert!(w.is_oscillating((0, 0)));
         assert!(w.wake_if_paused((0, 0)));
         assert!(!w.is_oscillating((0, 0)));
-        assert!(w.get_chunk(0, 0).is_some());
+        assert!(w.get_chunk((0, 0)).is_some());
         let pre_edit = collect_live(&w);
         w.set_cell(10, 10, true);
         let post_edit = collect_live(&w);
@@ -833,7 +842,7 @@ mod tests {
         assert!(w.is_oscillating((0, 0)));
         assert!(w.remove_chunk((0, 0)));
         assert!(!w.is_oscillating((0, 0)));
-        assert!(w.get_chunk(0, 0).is_none());
+        assert!(w.get_chunk((0, 0)).is_none());
     }
 
     #[test]
@@ -966,7 +975,7 @@ mod tests {
             let cy = y.div_euclid(CHUNK_SIZE_I64) as i32;
             let lx = x.rem_euclid(CHUNK_SIZE_I64) as usize;
             let ly = y.rem_euclid(CHUNK_SIZE_I64) as usize;
-            w.get_chunk(cx, cy).map_or(false, |c| c.get(lx, ly))
+            w.get_chunk((cx, cy)).map_or(false, |c| c.get(lx, ly))
         };
         let mut mismatches = Vec::<(i64, i64, bool, bool)>::new();
         for y in -PAD..SIDE + PAD {
@@ -997,12 +1006,12 @@ mod tests {
             let pause_tick = paused.tick_number();
             paused.set_tick_number(pause_tick + skipped);
             assert!(paused.wake_if_paused((0, 0)));
-            let woken_rows = *paused.get_chunk(0, 0).unwrap().rows();
+            let woken_rows = *paused.get_chunk((0, 0)).unwrap().rows();
 
             let mut plain = World::new();
             place_blinker(&mut plain, 5, 5);
             while plain.tick_number() < pause_tick + skipped { plain.tick(); }
-            let plain_rows = *plain.get_chunk(0, 0).unwrap().rows();
+            let plain_rows = *plain.get_chunk((0, 0)).unwrap().rows();
 
             assert_eq!(woken_rows, plain_rows, "phase mismatch at skipped={skipped}");
         }

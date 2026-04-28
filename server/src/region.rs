@@ -7,7 +7,7 @@
 
 use protocol::{Region, FLAG_FROZEN, FLAG_LOCKED, FLAG_OWNED};
 use serde::Deserialize;
-use simulation::{World, CHUNK_SIZE_I64};
+use simulation::World;
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -96,22 +96,7 @@ pub fn load(world: &mut World, path: &Path) -> Vec<Region> {
 
 /// Mark every cell inside `region` as frozen at its current alive value.
 fn apply_frozen(world: &mut World, r: &Region) {
-    let x1 = r.x + i64::from(r.w);
-    let y1 = r.y + i64::from(r.h);
-    for y in r.y..y1 {
-        for x in r.x..x1 {
-            let cx = x.div_euclid(CHUNK_SIZE_I64);
-            let cy = y.div_euclid(CHUNK_SIZE_I64);
-            let lx = x.rem_euclid(CHUNK_SIZE_I64) as usize;
-            let ly = y.rem_euclid(CHUNK_SIZE_I64) as usize;
-            // freeze_cell needs the bit to lock in; read it before freezing.
-            let alive = i32::try_from(cx).ok().zip(i32::try_from(cy).ok())
-                .and_then(|(cx, cy)| world.get_chunk(cx, cy))
-                .map(|ch| ch.get(lx, ly))
-                .unwrap_or(false);
-            world.freeze_cell(x, y, alive);
-        }
-    }
+    world.freeze_rect(r.x, r.y, r.w, r.h);
 }
 
 /// Returns true if `(x, y)` lies inside any region carrying `FLAG_LOCKED`.

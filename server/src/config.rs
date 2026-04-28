@@ -23,12 +23,15 @@ pub struct Config {
     pub oscillator_detection_max_chunks_per_step: usize,
     #[serde(default = "default_osc_promote_per_tick")]
     pub oscillator_promote_max_per_tick: usize,
+    #[serde(default = "default_osc_max_group")]
+    pub oscillator_max_group_size: usize,
 }
 
 fn default_client_max_chunks() -> u32 { 65535 }
 fn default_osc_interval_ms() -> u64 { 250 }
 fn default_osc_budget() -> usize { 1000 }
 fn default_osc_promote_per_tick() -> usize { 256 }
+fn default_osc_max_group() -> usize { 16 }
 
 impl Config {
     pub fn load(path: &Path) -> Self {
@@ -40,6 +43,15 @@ impl Config {
             cfg.client_max_chunks = v.parse()
                 .unwrap_or_else(|e| panic!("CLIENT_MAX_CHUNKS={v:?}: {e}"));
         }
+        cfg.validate();
         cfg
+    }
+
+    fn validate(&self) {
+        assert!(self.tick_hz > 0, "config: tick_hz must be > 0");
+        assert!(self.snapshot_interval_ticks > 0, "config: snapshot_interval_ticks must be > 0");
+        assert!(self.peer_outbound_capacity > 0, "config: peer_outbound_capacity must be > 0");
+        assert!(self.max_live_chunks > 0, "config: max_live_chunks must be > 0");
+        assert!(self.oscillator_max_group_size >= 2, "config: oscillator_max_group_size must be >= 2");
     }
 }

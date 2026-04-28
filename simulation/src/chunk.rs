@@ -163,6 +163,24 @@ impl Chunk {
         }
     }
 
+    /// Freeze every cell in the local rect `[lx0..=lx1, ly0..=ly1]` at its
+    /// current live value. Calls `Arc::make_mut` once per Arc instead of once
+    /// per cell, unlike calling [`freeze`] in a loop.
+    pub fn freeze_rect_at_current(&mut self, lx0: usize, lx1: usize, ly0: usize, ly1: usize) {
+        let arc = self.frozen.get_or_insert_with(|| Arc::new(FrozenMask::empty()));
+        let mask = Arc::make_mut(arc);
+        let row_bits: u64 = {
+            let w = lx1 - lx0 + 1;
+            if w >= 64 { u64::MAX } else { ((1u64 << w) - 1) << lx0 }
+        };
+        for ly in ly0..=ly1 {
+            let alive_bits = self.rows[ly] & row_bits;
+            mask.mask[ly] |= row_bits;
+            mask.value[ly] = (mask.value[ly] & !row_bits) | alive_bits;
+            // rows already hold the current live value; no change needed.
+        }
+    }
+
     /// Whether this chunk has cells on the edge that faces direction `(dx, dy)`
     /// relative to a neighbor, i.e. whether it could influence that neighbor.
     pub fn has_edge_toward(&self, dx: i32, dy: i32) -> bool {

@@ -280,7 +280,7 @@ async fn run(
                         let groups: Vec<(Vec<ChunkCoord>, u8)> = group_candidates
                             .iter()
                             .filter_map(|req| {
-                                collect_group(req.coord, req.period, &world, &subscribed)
+                                collect_group(req.coord, req.period, &world, &subscribed, cfg.oscillator_max_group_size)
                                     .map(|members| (members, req.period))
                             })
                             .collect();
@@ -390,8 +390,8 @@ fn collect_group(
     period: u8,
     world: &World,
     subscribed: &HashSet<ChunkCoord>,
+    max_group: usize,
 ) -> Option<Vec<ChunkCoord>> {
-    const MAX_GROUP: usize = 16;
     let _ = period; // period unused here; kept for call-site symmetry
     let mut group: Vec<ChunkCoord> = Vec::new();
     let mut visited: HashSet<ChunkCoord> = HashSet::new();
@@ -399,7 +399,7 @@ fn collect_group(
     while let Some(coord) = stack.pop() {
         if !visited.insert(coord) { continue; }
         if subscribed.contains(&coord) { return None; }
-        if group.len() >= MAX_GROUP { return None; }
+        if group.len() >= max_group { return None; }
         let chunk = world.get_live_chunk(coord)?;
         group.push(coord);
         let (cx, cy) = coord;
@@ -436,7 +436,7 @@ fn collect_group(
 fn collect(world: &World, coords: impl Iterator<Item = ChunkCoord>, hint: usize) -> Vec<ChunkSnap> {
     let mut out = Vec::with_capacity(hint);
     for coord in coords {
-        if let Some(chunk) = world.get_chunk(coord.0, coord.1) {
+        if let Some(chunk) = world.get_chunk(coord) {
             out.push(ChunkSnap {
                 coord,
                 bits: rows_to_bits(chunk.rows()),

@@ -231,6 +231,14 @@ pub fn replay_into(world: &mut simulation::World, snapshot_path: &Path, chunk_si
         // Live sim convention: WAL `tick` = `world.tick_number()` at the moment
         // edits were applied (after that tick's step, before the next). So step
         // forward to `tick` first, then set cells.
+        const MAX_TICK_ADVANCE: u64 = 10_000_000;
+        let gap = tick.saturating_sub(world.tick_number());
+        if gap > MAX_TICK_ADVANCE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("wal: tick jump of {gap} ticks exceeds {MAX_TICK_ADVANCE}; file may be corrupt"),
+            ));
+        }
         while world.tick_number() < tick {
             world.tick();
         }
