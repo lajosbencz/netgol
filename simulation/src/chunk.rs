@@ -10,8 +10,11 @@ const ROW_MASK: u64 = if CHUNK_SIZE == 64 {
     (1u64 << CHUNK_SIZE) - 1
 };
 const ROW_BYTES: usize = std::mem::size_of::<u64>();
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const AVX2_LANE_BYTES: usize = 32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const AVX2_LANE_ROWS: usize = AVX2_LANE_BYTES / ROW_BYTES;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const AVX2_LANES_PER_CHUNK: usize = (CHUNK_SIZE * ROW_BYTES) / AVX2_LANE_BYTES;
 const _: () = assert!(
     CHUNK_SIZE % AVX2_LANE_ROWS == 0,
@@ -274,6 +277,7 @@ unsafe fn is_empty_avx2(rows: &[u64; CHUNK_SIZE]) -> bool {
     _mm256_testz_si256(acc, acc) != 0
 }
 
+#[cfg(target_arch = "x86_64")]
 #[cfg_attr(not(any(target_feature = "avx2", test)), allow(dead_code))]
 #[target_feature(enable = "avx2")]
 unsafe fn kernel_avx2(
