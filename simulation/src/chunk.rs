@@ -82,14 +82,23 @@ impl Chunk {
 
     /// 64-bit multiply-mix over the row bits. Non-cryptographic; intended for
     /// cycle-detection identity checks where two equal `rows` must hash equal.
+    /// Four interleaved lanes break the multiply dependency chain so the CPU's
+    /// out-of-order engine can run them in parallel.
     pub fn hash_state(&self) -> u64 {
-        let mut h: u64 = HASH_MIX_K;
-        for &r in &self.rows {
-            h ^= r;
-            h = h.wrapping_mul(HASH_MIX_K);
-            h ^= h >> (u64::BITS / 2);
+        const _: () = assert!(CHUNK_SIZE % 4 == 0, "hash uses 4 interleaved lanes");
+        let mut h0: u64 = HASH_MIX_K;
+        let mut h1: u64 = HASH_MIX_K.wrapping_add(1);
+        let mut h2: u64 = HASH_MIX_K.wrapping_add(2);
+        let mut h3: u64 = HASH_MIX_K.wrapping_add(3);
+        for q in self.rows.chunks_exact(4) {
+            h0 ^= q[0]; h0 = h0.wrapping_mul(HASH_MIX_K); h0 ^= h0 >> (u64::BITS / 2);
+            h1 ^= q[1]; h1 = h1.wrapping_mul(HASH_MIX_K); h1 ^= h1 >> (u64::BITS / 2);
+            h2 ^= q[2]; h2 = h2.wrapping_mul(HASH_MIX_K); h2 ^= h2 >> (u64::BITS / 2);
+            h3 ^= q[3]; h3 = h3.wrapping_mul(HASH_MIX_K); h3 ^= h3 >> (u64::BITS / 2);
         }
-        h
+        let lo = h0.wrapping_mul(HASH_MIX_K) ^ h1;
+        let hi = h2.wrapping_mul(HASH_MIX_K) ^ h3;
+        lo.wrapping_mul(HASH_MIX_K) ^ hi
     }
 
     pub fn is_empty(&self) -> bool {
