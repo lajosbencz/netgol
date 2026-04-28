@@ -52,7 +52,7 @@
 
       #stats { top: 8px; left: 8px; }
       #stamps { top: 8px; right: 8px; }
-      #info { bottom: 8px; right: 8px; max-width: 260px; }
+      #controls { bottom: 8px; right: 8px; max-width: 280px; }
 
       .dot {
         display: inline-block;
@@ -66,7 +66,7 @@
       .dot.red { background: var(--status-err); }
 
       svg.icon { width: 14px; height: 14px; flex: none; color: var(--hud); }
-      #info > header svg.icon { color: var(--status-info); }
+      #controls > header svg.icon { color: var(--status-info); }
       #stamps > header svg.icon { color: var(--status-stamp); }
 
       #stats .body span.value { color: var(--panel-fg); }
@@ -97,7 +97,13 @@
       #stamps button:hover { background: rgba(255, 255, 255, 0.06); }
       #stamps button.active { background: var(--accent); color: white; }
 
-      #info .body { color: var(--hud); font-size: 11px; line-height: 1.6; }
+      #controls .body { color: var(--hud); font-size: 11px; }
+      #controls h4 { margin: 8px 0 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--panel-fg); }
+      #controls h4:first-child { margin-top: 0; }
+      #controls table { border-collapse: collapse; width: 100%; }
+      #controls td { padding: 1px 0; line-height: 1.7; }
+      #controls td:first-child { color: var(--panel-fg); padding-right: 10px; white-space: nowrap; }
+      .v-pixels { margin-left: auto; font-size: 10px; color: var(--hud); letter-spacing: 0.03em; }
 
       #fab {
         position: fixed;
@@ -154,7 +160,7 @@
     <canvas id="canvas"></canvas>
     <div id="stats" class="panel collapsed"></div>
     <div id="stamps" class="panel collapsed"></div>
-    <div id="info" class="panel collapsed"></div>
+    <div id="controls" class="panel collapsed"></div>
     <div id="links"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

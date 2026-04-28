@@ -4,6 +4,8 @@
 import { CHUNK_SIZE } from './protocol';
 
 export const HALO = 2;
+export const ZOOM_MIN = 1;
+export const ZOOM_MAX = 32;
 
 export type Camera = { x: number; y: number; zoom: number };
 

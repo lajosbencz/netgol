@@ -3,10 +3,8 @@
 // Apply-from-URL on load and on hashchange (link sharing); write-to-URL on
 // pan/zoom settle (debounced) using replaceState so the back button is unaffected.
 
-import { Camera } from './viewport';
+import { Camera, ZOOM_MIN, ZOOM_MAX } from './viewport';
 
-const ZOOM_MIN = 1 / 4;
-const ZOOM_MAX = 32;
 const ZOOM_DECIMALS = 3;
 
 function clamp(v: number, lo: number, hi: number) {

@@ -9,9 +9,7 @@ import { ChunkCache } from '../world';
 import { StampState } from '../stamp_state';
 import { Stamp, stampAnchor } from '../stamps';
 import { worldToCellAddr } from '../coords';
-
-const ZOOM_MIN = 1 / 4;
-const ZOOM_MAX = 32;
+import { ZOOM_MIN, ZOOM_MAX } from '../viewport';
 
 export class Actions {
   private pending = new Map<string, EditCell>();
@@ -82,6 +80,7 @@ export class Actions {
   commitSelection() { this.selection.commit(this.send); }
   cancelSelection() { this.selection.cancel(); }
   clearStamp() { this.stamps.select(null); }
+  rotateStamp() { this.stamps.rotate(); }
 
   panBy(screenDx: number, screenDy: number) {
     this.cam.x -= screenDx / this.cam.zoom;
@@ -92,13 +91,9 @@ export class Actions {
   zoomBy(factor: number, screenX: number, screenY: number) {
     const newZoom = clamp(this.cam.zoom * factor, ZOOM_MIN, ZOOM_MAX);
     if (newZoom === this.cam.zoom) return;
-    // Zoom-around-anchor at normal zoom; canvas-center at extreme zoom-out.
-    // Off-center anchor zoom drifts the camera by ~(anchor-offset)/zoom cells per
-    // step; at small zoom that drift dominates the viewport.
     const rect = this.canvas.getBoundingClientRect();
-    const useCenter = newZoom < 0.5;
-    const px = useCenter ? rect.width / 2 : screenX;
-    const py = useCenter ? rect.height / 2 : screenY;
+    const px = screenX;
+    const py = screenY;
     const before = screenToWorld(this.cam, rect.width, rect.height, px, py);
     this.cam.zoom = newZoom;
     const after = screenToWorld(this.cam, rect.width, rect.height, px, py);

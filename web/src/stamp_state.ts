@@ -1,7 +1,7 @@
 // Currently armed stamp. Click a stamp button to arm; click canvas to place;
 // click the same button or press Escape to disarm.
 
-import { Stamp } from './stamps';
+import { Stamp, rotateStampCW } from './stamps';
 
 export class StampState {
   private current: Stamp | null = null;
@@ -10,6 +10,12 @@ export class StampState {
   select(s: Stamp | null) {
     if (this.current === s) return;
     this.current = s;
+    for (const fn of this.listeners) fn();
+  }
+
+  rotate() {
+    if (!this.current) return;
+    this.current = rotateStampCW(this.current);
     for (const fn of this.listeners) fn();
   }
 

@@ -124,6 +124,10 @@ export class DesktopControls {
       this.a.clearStamp();
     } else if (e.key === 'Enter' && this.a.selection.isActive()) {
       this.a.commitSelection();
+    } else if (e.key === 's' || e.key === 'S') {
+      document.getElementById('stamps')?.classList.toggle('collapsed');
+    } else if ((e.key === 'r' || e.key === 'R') && this.a.stamps.active()) {
+      this.a.rotateStamp();
     }
   };
 

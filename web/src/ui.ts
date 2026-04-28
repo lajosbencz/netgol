@@ -1,6 +1,8 @@
 // Stats panel: connection-status header + collapsible body with server stats
 // and viewport position/zoom.
 
+import { CHUNK_SIZE } from './protocol';
+
 export type ConnState = 'connecting' | 'connected' | 'disconnected';
 
 export type HudState = {
@@ -23,11 +25,14 @@ export class Hud {
   private vPos: HTMLElement;
   private vZoom: HTMLElement;
 
+  private vPixels: HTMLElement;
+
   constructor(el: HTMLElement) {
     el.innerHTML =
       `<header>` +
       `<span class="dot"></span>` +
       `<span class="status-text"></span>` +
+      `<span class="v-pixels"></span>` +
       `</header>` +
       `<div class="body">` +
       `<div>chunks <span class="v-chunks"></span></div>` +
@@ -43,6 +48,7 @@ export class Hud {
     this.vUtil = el.querySelector('.v-util') as HTMLElement;
     this.vPos = el.querySelector('.v-pos') as HTMLElement;
     this.vZoom = el.querySelector('.v-zoom') as HTMLElement;
+    this.vPixels = el.querySelector('.v-pixels') as HTMLElement;
     makeCollapsible(el);
   }
 
@@ -51,6 +57,8 @@ export class Hud {
     if (this.dot.className !== `dot ${dotClass}`) this.dot.className = `dot ${dotClass}`;
     setText(this.statusText, label);
     setText(this.vChunks, `${s.cachedChunks}/${s.liveChunks}`);
+    const pixels = s.liveChunks * CHUNK_SIZE * CHUNK_SIZE;
+    setText(this.vPixels, pixels > 0 ? pixels.toExponential(2) : '');
     setText(this.vRate, s.tickRateHz.toFixed(1));
     setText(this.vUtil, (s.tickUtilization * 100).toFixed(1));
     setText(this.vPos, `${Math.round(s.camX)}, ${Math.round(s.camY)}`);

@@ -2,6 +2,20 @@
 
 export type Stamp = { name: string; category: string; pattern: string[] };
 
+export function rotateStampCW(stamp: Stamp): Stamp {
+  const rows = stamp.pattern;
+  const h = rows.length;
+  const w = Math.max(...rows.map(r => r.length));
+  const padded = rows.map(r => r.padEnd(w, '.'));
+  const newRows: string[] = [];
+  for (let x = 0; x < w; x++) {
+    let row = '';
+    for (let y = h - 1; y >= 0; y--) row += padded[y][x] ?? '.';
+    newRows.push(row);
+  }
+  return { ...stamp, pattern: newRows };
+}
+
 export const STAMPS: ReadonlyArray<Stamp> = [
   { name: 'Block', category: 'still', pattern: ['##', '##'] },
   { name: 'Beehive', category: 'still', pattern: ['.##.', '#..#', '.##.'] },

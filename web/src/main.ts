@@ -8,7 +8,7 @@ import { Hud, ConnState } from './ui';
 import { Selection } from './selection';
 import { StampUi } from './stamp_ui';
 import { StampState } from './stamp_state';
-import { InfoUi } from './info_ui';
+import { ControlsUi } from './controls_ui';
 import { applyUrlToCamera, UrlSync } from './url_sync';
 import { mountIcons } from './icons';
 import { Links } from './links';
@@ -31,7 +31,7 @@ const palette: Palette = {
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
 const statsEl = document.getElementById('stats') as HTMLElement;
 const stampsEl = document.getElementById('stamps') as HTMLElement;
-const infoEl = document.getElementById('info') as HTMLElement;
+const controlsEl = document.getElementById('controls') as HTMLElement;
 const linksEl = document.getElementById('links') as HTMLElement;
 
 const cam: Camera = { x: 0, y: 0, zoom: 3 };
@@ -45,7 +45,7 @@ const renderer = new Renderer(canvas, BG, ALIVE, ACCENT);
 const hud = new Hud(statsEl);
 const selection = new Selection();
 const stampState = new StampState();
-new InfoUi(infoEl);
+new ControlsUi(controlsEl);
 
 let liveChunks = 0;
 let tickRateHz = 0;
