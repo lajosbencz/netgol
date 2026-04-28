@@ -593,4 +593,208 @@ mod tests {
         assert!(!w.is_oscillating((0, 0)));
         assert!(w.get_chunk(0, 0).is_none());
     }
+
+    #[test]
+    fn block_at_four_chunk_corner_is_still_life() {
+        // 2x2 block straddling chunks (-1,-1), (0,-1), (-1,0), (0,0). Exercises
+        // the four corner halo entries simultaneously.
+        let mut w = World::new();
+        for &(x, y) in &[(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+            w.set_cell(x, y, true);
+        }
+        let initial = collect_live(&w);
+        for _ in 0..20 { w.tick(); }
+        assert_eq!(collect_live(&w), initial, "block straddling 4 chunks must be still life");
+    }
+
+    #[test]
+    fn birth_across_right_chunk_edge() {
+        // Vertical 3-cell line at right edge of chunk (0,0) rotates to a
+        // horizontal line, birthing one cell into chunk (1,0).
+        let mut w = World::new();
+        for &y in &[5i64, 6, 7] { w.set_cell(63, y, true); }
+        w.tick();
+        let expected: BTreeSet<(i64, i64)> = [(62, 6), (63, 6), (64, 6)].into_iter().collect();
+        assert_eq!(collect_live(&w), expected);
+    }
+
+    #[test]
+    fn birth_across_left_chunk_edge() {
+        let mut w = World::new();
+        for &y in &[5i64, 6, 7] { w.set_cell(0, y, true); }
+        w.tick();
+        let expected: BTreeSet<(i64, i64)> = [(-1, 6), (0, 6), (1, 6)].into_iter().collect();
+        assert_eq!(collect_live(&w), expected);
+    }
+
+    #[test]
+    fn birth_across_top_chunk_edge() {
+        let mut w = World::new();
+        for &x in &[5i64, 6, 7] { w.set_cell(x, 0, true); }
+        w.tick();
+        let expected: BTreeSet<(i64, i64)> = [(6, -1), (6, 0), (6, 1)].into_iter().collect();
+        assert_eq!(collect_live(&w), expected);
+    }
+
+    #[test]
+    fn birth_across_bottom_chunk_edge() {
+        let mut w = World::new();
+        for &x in &[5i64, 6, 7] { w.set_cell(x, 63, true); }
+        w.tick();
+        let expected: BTreeSet<(i64, i64)> = [(6, 62), (6, 63), (6, 64)].into_iter().collect();
+        assert_eq!(collect_live(&w), expected);
+    }
+
+    #[test]
+    fn glider_drifts_into_negative_chunk() {
+        // 180-degree-rotated glider drifts (-1,-1). After 60 ticks it has
+        // translated (-15,-15), crossing into chunk (-1,-1).
+        let mut w = World::new();
+        let off = 10i64;
+        for &(x, y) in &[(0, 0), (1, 0), (2, 0), (0, 1), (1, 2)] {
+            w.set_cell(off + x, off + y, true);
+        }
+        let initial: BTreeSet<(i64, i64)> = collect_live(&w);
+        for _ in 0..60 { w.tick(); }
+        let translated: BTreeSet<(i64, i64)> = initial.iter().map(|(x, y)| (x - 15, y - 15)).collect();
+        assert_eq!(collect_live(&w), translated);
+    }
+
+    #[test]
+    fn world_step_matches_brute_force_across_2x2_chunks() {
+        // Random density across a 2x2 block of chunks; compared to a
+        // cell-by-cell reference on an extended grid. Catches halo direction
+        // bugs that any single-chunk test would miss.
+        const SIDE: i64 = CHUNK_SIZE_I64 * 2;
+        const TICKS: usize = 8;
+        const PAD: i64 = TICKS as i64 + 1;
+        const G: i64 = SIDE + 2 * PAD;
+
+        let idx = |x: i64, y: i64| -> usize {
+            let gx = (x + PAD) as usize;
+            let gy = (y + PAD) as usize;
+            gy * (G as usize) + gx
+        };
+        let in_bounds = |x: i64, y: i64| (-PAD..SIDE + PAD).contains(&x) && (-PAD..SIDE + PAD).contains(&y);
+
+        let mut w = World::new();
+        let mut grid = vec![false; (G * G) as usize];
+
+        let mut rng: u64 = 0xdead_beef_cafe_babe;
+        let mut next = || -> u64 {
+            let mut x = rng;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            rng = x;
+            x
+        };
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                if next() >> 63 == 1 {
+                    w.set_cell(x, y, true);
+                    grid[idx(x, y)] = true;
+                }
+            }
+        }
+
+        for _ in 0..TICKS {
+            w.tick();
+            let mut nxt = vec![false; grid.len()];
+            for y in -PAD..SIDE + PAD {
+                for x in -PAD..SIDE + PAD {
+                    let mut count = 0u8;
+                    for dy in -1i64..=1 {
+                        for dx in -1i64..=1 {
+                            if dx == 0 && dy == 0 { continue; }
+                            if in_bounds(x + dx, y + dy) && grid[idx(x + dx, y + dy)] {
+                                count += 1;
+                            }
+                        }
+                    }
+                    let alive = grid[idx(x, y)];
+                    nxt[idx(x, y)] = matches!((alive, count), (true, 2 | 3) | (false, 3));
+                }
+            }
+            grid = nxt;
+        }
+
+        let world_at = |w: &World, x: i64, y: i64| -> bool {
+            let cx = x.div_euclid(CHUNK_SIZE_I64) as i32;
+            let cy = y.div_euclid(CHUNK_SIZE_I64) as i32;
+            let lx = x.rem_euclid(CHUNK_SIZE_I64) as usize;
+            let ly = y.rem_euclid(CHUNK_SIZE_I64) as usize;
+            w.get_chunk(cx, cy).map_or(false, |c| c.get(lx, ly))
+        };
+        let mut mismatches = Vec::<(i64, i64, bool, bool)>::new();
+        for y in -PAD..SIDE + PAD {
+            for x in -PAD..SIDE + PAD {
+                let wcell = world_at(&w, x, y);
+                let gcell = grid[idx(x, y)];
+                if wcell != gcell { mismatches.push((x, y, wcell, gcell)); }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "world vs reference differ in {} cells; first {:?}",
+            mismatches.len(),
+            &mismatches[..mismatches.len().min(5)]
+        );
+    }
+
+    #[test]
+    fn paused_chunk_wakes_to_correct_phase() {
+        // For each skip offset, pause a fresh blinker, advance the tick, wake,
+        // and compare to a non-paused reference world stepped to the same tick.
+        for skipped in 0..6u64 {
+            let mut paused = World::new();
+            place_blinker(&mut paused, 5, 5);
+            let mut det = crate::oscillator::Detector::new();
+            run_until_promoted(&mut paused, &mut det, (0, 0), 200);
+            assert!(paused.is_oscillating((0, 0)));
+            let pause_tick = paused.tick_number();
+            paused.set_tick_number(pause_tick + skipped);
+            assert!(paused.wake_if_paused((0, 0)));
+            let woken_rows = *paused.get_chunk(0, 0).unwrap().rows();
+
+            let mut plain = World::new();
+            place_blinker(&mut plain, 5, 5);
+            while plain.tick_number() < pause_tick + skipped { plain.tick(); }
+            let plain_rows = *plain.get_chunk(0, 0).unwrap().rows();
+
+            assert_eq!(woken_rows, plain_rows, "phase mismatch at skipped={skipped}");
+        }
+    }
+
+    #[test]
+    fn perturbing_one_paused_chunk_does_not_wake_distant_neighbor() {
+        // Two interior blinkers in adjacent chunks, both paused. A perturbation
+        // entering only one chunk must not wake the other.
+        let mut w = World::new();
+        place_blinker(&mut w, 28, 28);
+        place_blinker(&mut w, CHUNK_SIZE_I64 + 28, 28);
+        let mut det = crate::oscillator::Detector::new();
+        let mut outcome = TickOutcome::default();
+        let mut promote_buf = Vec::new();
+        for _ in 0..200 {
+            if w.is_oscillating((0, 0)) && w.is_oscillating((1, 0)) { break; }
+            w.tick_into(&mut outcome);
+            for r in outcome.hash_reports.drain(..) { det.observe(r); }
+            promote_buf.clear();
+            det.scan(64, &mut promote_buf);
+            for req in promote_buf.drain(..) { w.promote_oscillator(req.coord, req.period); }
+        }
+        assert!(w.is_oscillating((0, 0)) && w.is_oscillating((1, 0)));
+
+        // Glider in chunk (-1,0), far from the (0,0)-(1,0) seam. Cannot reach
+        // chunk (1,0) within 10 ticks (~2 cells of glider drift).
+        for &(x, y) in &[(1i64, 0i64), (2, 1), (0, 2), (1, 2), (2, 2)] {
+            w.set_cell(x - CHUNK_SIZE_I64 + 4, y + 30, true);
+        }
+        for _ in 0..10 {
+            w.tick_into(&mut outcome);
+            for r in outcome.hash_reports.drain(..) { det.observe(r); }
+        }
+        assert!(w.is_oscillating((1, 0)), "distant neighbor woke despite isolation");
+    }
 }
