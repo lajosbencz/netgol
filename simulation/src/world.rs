@@ -2,6 +2,7 @@
 //! and drops chunks that go fully empty unless they're frozen.
 
 use crate::chunk::{Chunk, EdgeBundle, StepResult};
+use crate::oscillator::{HashReport, Oscillator};
 use crate::{CHUNK_SIZE, CHUNK_SIZE_I64};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -34,24 +35,28 @@ impl Hasher for CoordHasher {
     }
 }
 
-type CoordMap<V> = HashMap<ChunkCoord, V, BuildHasherDefault<CoordHasher>>;
+pub(crate) type CoordMap<V> = HashMap<ChunkCoord, V, BuildHasherDefault<CoordHasher>>;
 type CoordSet = HashSet<ChunkCoord, BuildHasherDefault<CoordHasher>>;
 
 #[derive(Debug, Default, Clone)]
 pub struct World {
     chunks: CoordMap<Chunk>,
+    oscillators: CoordMap<Oscillator>,
     tick: u64,
+    osc_detection_enabled: bool,
     /// Start-of-tick snapshot: halo assembly must not see mid-tick mutations
     /// from earlier candidates in the loop. Cleared (capacity retained) per tick.
     scratch_edges: CoordMap<EdgeBundle>,
     scratch_candidates: CoordSet,
     scratch_candidates_vec: Vec<ChunkCoord>,
+    scratch_wakes: Vec<ChunkCoord>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct TickOutcome {
     pub changed: Vec<ChunkCoord>,
     pub removed: Vec<ChunkCoord>,
+    pub hash_reports: Vec<HashReport>,
 }
 
 impl World {
@@ -103,13 +108,95 @@ impl World {
         self.chunks.insert(coord, chunk);
     }
 
-    /// Remove a chunk (used by the reaper). Returns `true` if it existed.
+    /// Remove a chunk (used by the reaper). Returns `true` if it existed in
+    /// either `chunks` or `oscillators`.
     pub fn remove_chunk(&mut self, coord: ChunkCoord) -> bool {
-        self.chunks.remove(&coord).is_some()
+        let in_chunks = self.chunks.remove(&coord).is_some();
+        let in_oscillators = self.oscillators.remove(&coord).is_some();
+        in_chunks || in_oscillators
     }
 
     pub fn set_tick_number(&mut self, tick: u64) {
         self.tick = tick;
+    }
+
+    pub fn set_oscillator_detection(&mut self, enabled: bool) {
+        self.osc_detection_enabled = enabled;
+        if !enabled {
+            for (coord, osc) in self.oscillators.drain() {
+                let chunk = wake_chunk(osc, self.tick);
+                self.chunks.insert(coord, chunk);
+            }
+        }
+    }
+
+    pub fn oscillator_count(&self) -> usize {
+        self.oscillators.len()
+    }
+
+    pub fn is_oscillating(&self, coord: ChunkCoord) -> bool {
+        self.oscillators.contains_key(&coord)
+    }
+
+    /// Move a chunk from `chunks` to `oscillators`. Refuses if the chunk is
+    /// missing, frozen, or its current halo is non-zero (the detector's verdict
+    /// can be stale by the time the sim drains the request). Returns true on
+    /// success.
+    pub fn promote_oscillator(&mut self, coord: ChunkCoord, period: u8) -> bool {
+        if !self.osc_detection_enabled || period == 0 || (period as usize) > crate::oscillator::MAX_PERIOD {
+            return false;
+        }
+        match self.chunks.get(&coord) {
+            Some(c) if !c.is_frozen() => {}
+            _ => return false,
+        }
+        if !self.halo_for(coord).is_zero() {
+            return false;
+        }
+        let chunk = self.chunks.remove(&coord).expect("contains_key checked above");
+        self.oscillators.insert(coord, Oscillator {
+            chunk,
+            period,
+            paused_at_tick: self.tick,
+        });
+        true
+    }
+
+    fn halo_for(&self, coord: ChunkCoord) -> EdgeBundle {
+        let (x, y) = coord;
+        let edges_of = |c: ChunkCoord| {
+            self.chunks.get(&c)
+                .filter(|ch| !ch.is_empty())
+                .map(|ch| ch.edges())
+                .unwrap_or_else(EdgeBundle::empty)
+        };
+        let above = edges_of((x, y - 1));
+        let below = edges_of((x, y + 1));
+        let left = edges_of((x - 1, y));
+        let right = edges_of((x + 1, y));
+        let tl = edges_of((x - 1, y - 1));
+        let tr = edges_of((x + 1, y - 1));
+        let bl = edges_of((x - 1, y + 1));
+        let br = edges_of((x + 1, y + 1));
+        EdgeBundle {
+            top: above.bottom,
+            bottom: below.top,
+            left: left.right,
+            right: right.left,
+            corners: [tl.corners[3], tr.corners[2], bl.corners[1], br.corners[0]],
+        }
+    }
+
+    /// If `coord` is paused, advance it to the current tick's phase and put it
+    /// back in `chunks`. Returns true if a wake happened.
+    pub fn wake_if_paused(&mut self, coord: ChunkCoord) -> bool {
+        if let Some(osc) = self.oscillators.remove(&coord) {
+            let chunk = wake_chunk(osc, self.tick);
+            self.chunks.insert(coord, chunk);
+            true
+        } else {
+            false
+        }
     }
 
     /// Advance every live chunk and its neighbors by one GoL step.
@@ -129,15 +216,46 @@ impl World {
     pub fn tick_into(&mut self, outcome: &mut TickOutcome) {
         outcome.changed.clear();
         outcome.removed.clear();
+        outcome.hash_reports.clear();
         self.scratch_edges.clear();
         self.scratch_candidates.clear();
         self.scratch_candidates_vec.clear();
+        self.scratch_wakes.clear();
 
         for (&coord, ch) in &self.chunks {
             if ch.is_empty() {
                 continue;
             }
             self.scratch_edges.insert(coord, ch.edges());
+        }
+
+        if !self.oscillators.is_empty() {
+            for (&(x, y), e) in &self.scratch_edges {
+                let probes: [(bool, ChunkCoord); 8] = [
+                    (e.top != 0, (x, y - 1)),
+                    (e.bottom != 0, (x, y + 1)),
+                    (e.left != 0, (x - 1, y)),
+                    (e.right != 0, (x + 1, y)),
+                    (e.corners[0] != 0, (x - 1, y - 1)),
+                    (e.corners[1] != 0, (x + 1, y - 1)),
+                    (e.corners[2] != 0, (x - 1, y + 1)),
+                    (e.corners[3] != 0, (x + 1, y + 1)),
+                ];
+                for (has_bit, c) in probes {
+                    if has_bit && self.oscillators.contains_key(&c) {
+                        self.scratch_wakes.push(c);
+                    }
+                }
+            }
+            self.scratch_wakes.sort_unstable();
+            self.scratch_wakes.dedup();
+            for &coord in &self.scratch_wakes {
+                let osc = self.oscillators.remove(&coord).expect("contains_key probed above");
+                let chunk = wake_chunk(osc, self.tick);
+                self.scratch_edges.insert(coord, chunk.edges());
+                self.chunks.insert(coord, chunk);
+                outcome.changed.push(coord);
+            }
         }
 
         let edges = &self.scratch_edges;
@@ -161,15 +279,29 @@ impl World {
         }
 
         let empty_chunk = Chunk::empty();
+        let detect = self.osc_detection_enabled;
+        let now_tick = self.tick;
         for i in 0..self.scratch_candidates_vec.len() {
             let coord = self.scratch_candidates_vec[i];
+            let halo_was_zero;
             let result = {
                 let current = self.chunks.get(&coord).unwrap_or(&empty_chunk);
                 let halo = assemble_halo(coord, &self.scratch_edges);
+                halo_was_zero = halo.is_zero();
                 current.step(&halo)
             };
             let next = match result {
-                StepResult::Unchanged => continue,
+                StepResult::Unchanged => {
+                    if detect {
+                        outcome.hash_reports.push(HashReport {
+                            coord,
+                            hash: self.chunks.get(&coord).map(Chunk::hash_state).unwrap_or(0),
+                            halo_was_zero,
+                            tick: now_tick,
+                        });
+                    }
+                    continue;
+                }
                 StepResult::Stepped(c) => c,
             };
             if next.is_empty() && !next.is_frozen() {
@@ -178,6 +310,7 @@ impl World {
                 }
                 continue;
             }
+            let chunk_hash = if detect { next.hash_state() } else { 0 };
             match self.chunks.entry(coord) {
                 Entry::Occupied(mut slot) => {
                     if slot.get().rows() != next.rows() {
@@ -189,6 +322,14 @@ impl World {
                     slot.insert(next);
                     outcome.changed.push(coord);
                 }
+            }
+            if detect {
+                outcome.hash_reports.push(HashReport {
+                    coord,
+                    hash: chunk_hash,
+                    halo_was_zero,
+                    tick: now_tick,
+                });
             }
         }
 
@@ -205,6 +346,20 @@ fn split(x: i64, y: i64) -> (ChunkCoord, usize, usize) {
     let ly = y.rem_euclid(CHUNK_SIZE_I64) as usize;
     debug_assert!(lx < CHUNK_SIZE && ly < CHUNK_SIZE);
     ((cx, cy), lx, ly)
+}
+
+fn wake_chunk(osc: Oscillator, current_tick: u64) -> Chunk {
+    let skipped = current_tick.saturating_sub(osc.paused_at_tick);
+    let phase_offset = (skipped % osc.period as u64) as u32;
+    let mut chunk = osc.chunk;
+    let empty = EdgeBundle::empty();
+    for _ in 0..phase_offset {
+        chunk = match chunk.step(&empty) {
+            StepResult::Stepped(c) => c,
+            StepResult::Unchanged => chunk,
+        };
+    }
+    chunk
 }
 
 fn assemble_halo(coord: ChunkCoord, cache: &CoordMap<EdgeBundle>) -> EdgeBundle {

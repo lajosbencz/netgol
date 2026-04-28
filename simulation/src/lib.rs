@@ -9,10 +9,12 @@ pub const CHUNK_SIZE: usize = 64;
 pub const CHUNK_SIZE_I64: i64 = CHUNK_SIZE as i64;
 
 mod chunk;
+mod oscillator;
 mod world;
 
 #[cfg(feature = "wasm")]
 mod wasm;
 
 pub use chunk::{Chunk, EdgeBundle, FrozenMask, StepResult};
+pub use oscillator::{Detector, HashReport, Oscillator, PromoteRequest, MAX_PERIOD};
 pub use world::{ChunkCoord, TickOutcome, World};
