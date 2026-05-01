@@ -108,6 +108,15 @@ impl World {
             })
     }
 
+    /// Strip all frozen masks from every chunk. Called before region loading so
+    /// the regions file is the sole source of truth for frozen state; stale
+    /// masks from old snapshots (e.g. after a region origin change) do not persist.
+    pub fn clear_all_frozen(&mut self) {
+        for chunk in self.chunks.values_mut() {
+            chunk.clear_frozen();
+        }
+    }
+
     /// Replace the owned-chunk set. Owned chunks reject inbound halo edges from
     /// non-owned neighbours, preventing external births into claimed regions.
     pub fn set_owned_chunks(&mut self, owned: CoordMap<()>) {

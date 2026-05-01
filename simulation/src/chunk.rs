@@ -150,6 +150,10 @@ impl Chunk {
         }
     }
 
+    pub fn clear_frozen(&mut self) {
+        self.frozen = None;
+    }
+
     pub fn unfreeze(&mut self, x: usize, y: usize) {
         assert!(x < CHUNK_SIZE && y < CHUNK_SIZE);
         if let Some(arc) = self.frozen.as_mut() {

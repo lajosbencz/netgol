@@ -49,6 +49,10 @@ pub fn load(world: &mut World, path: &Path) -> Vec<Region> {
     let f: File = toml::from_str(&text)
         .unwrap_or_else(|e| panic!("parse regions {}: {e}", path.display()));
 
+    // Regions are the sole source of truth for frozen state. Strip any stale
+    // masks carried over from the snapshot (e.g. after a region origin change).
+    world.clear_all_frozen();
+
     let mut out = Vec::with_capacity(f.regions.len());
     let mut total_cells: u64 = 0;
     for entry in f.regions {
