@@ -63,6 +63,12 @@ pub fn load(world: &mut World, path: &Path) -> Vec<Region> {
         };
 
         if let Some(pat) = &entry.pattern {
+            // Clear the full rect first so snapshot state doesn't bleed through dots.
+            for dy in 0..h as i64 {
+                for dx in 0..w as i64 {
+                    world.set_cell(ox + dx, oy + dy, false);
+                }
+            }
             for (row_idx, line) in pat.lines().enumerate() {
                 for (col_idx, ch) in line.chars().enumerate() {
                     let alive = match ch {
