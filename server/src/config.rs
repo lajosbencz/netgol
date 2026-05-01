@@ -1,5 +1,6 @@
 use figment::{Figment, providers::{Env, Format, Serialized, Toml}};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// A single OIDC/OAuth2 provider. Routes: `/auth/{name}` and `/auth/{name}/callback`.
@@ -12,13 +13,9 @@ use std::path::{Path, PathBuf};
 ///   must all be provided. Use for providers that do not implement OIDC (e.g. GitHub).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OidcProvider {
-    /// URL slug used in route paths (e.g. `"google"`). Must be URL-safe.
-    pub name: String,
-    /// Supplied via env to avoid storing secrets in config files.
-    /// e.g. `NETGOL_OIDC_PROVIDERS_0__CLIENT_ID`
+    /// Supplied via env: `NETGOL_OIDC_PROVIDERS__<NAME>__CLIENT_ID`
     pub client_id: Option<String>,
-    /// Supplied via env to avoid storing secrets in config files.
-    /// e.g. `NETGOL_OIDC_PROVIDERS_0__CLIENT_SECRET`
+    /// Supplied via env: `NETGOL_OIDC_PROVIDERS__<NAME>__CLIENT_SECRET`
     pub client_secret: Option<String>,
     /// OIDC issuer URL. When set, all endpoints are discovered automatically.
     pub issuer_url: Option<String>,
@@ -33,13 +30,13 @@ pub struct OidcProvider {
 }
 
 impl OidcProvider {
-    pub fn display(&self) -> &str {
-        self.display_name.as_deref().unwrap_or(&self.name)
+    pub fn display<'a>(&'a self, name: &'a str) -> &'a str {
+        self.display_name.as_deref().unwrap_or(name)
     }
 
-    /// Redirect URI derived from `base_url` — never configured manually.
-    pub fn redirect_uri(&self, base_url: &str) -> String {
-        format!("{}/auth/{}/callback", base_url.trim_end_matches('/'), self.name)
+    /// Redirect URI derived from `base_url` and the provider's map key.
+    pub fn redirect_uri(&self, base_url: &str, name: &str) -> String {
+        format!("{}/auth/{}/callback", base_url.trim_end_matches('/'), name)
     }
 }
 
@@ -68,7 +65,10 @@ pub struct Config {
     /// Used to construct OIDC redirect URIs and any other absolute URLs.
     pub base_url: String,
 
-    pub oidc_providers: Vec<OidcProvider>,
+    /// Keyed by provider slug (e.g. `"google"`).
+    /// TOML: `[oidc_providers.google]`
+    /// Env:  `NETGOL_OIDC_PROVIDERS__GOOGLE__CLIENT_ID`
+    pub oidc_providers: HashMap<String, OidcProvider>,
     pub jwt_secret: String,
 
     pub claim_w_chunks: u32,
@@ -94,7 +94,7 @@ impl Default for Config {
             oscillator_promote_max_per_tick: 256,
             oscillator_max_group_size: 16,
             base_url: "http://localhost:8080".into(),
-            oidc_providers: Vec::new(),
+            oidc_providers: HashMap::new(),
             jwt_secret: "change-me".into(),
             claim_w_chunks: 3,
             claim_h_chunks: 2,

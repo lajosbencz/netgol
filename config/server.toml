@@ -15,19 +15,19 @@ users_dir      = "data/users"
 claims_dir     = "data/claims"
 
 # OIDC provider (auto-discovered via issuer_url):
-# [[oidc_providers]]
-# name          = "google"
-# client_id     = ""
-# client_secret = ""
-# issuer_url    = "https://accounts.google.com"
-# display_name  = "Google"
+# [oidc_providers.google]
+# display_name = "Google"
+# issuer_url   = "https://accounts.google.com"
+# client_id and client_secret injected via env:
+#   NETGOL_OIDC_PROVIDERS__GOOGLE__CLIENT_ID
+#   NETGOL_OIDC_PROVIDERS__GOOGLE__CLIENT_SECRET
 
 # OAuth2-only provider (explicit endpoints, e.g. GitHub):
-# [[oidc_providers]]
-# name          = "github"
-# client_id     = ""
-# client_secret = ""
+# [oidc_providers.github]
+# display_name  = "GitHub"
 # auth_url      = "https://github.com/login/oauth/authorize"
 # token_url     = "https://github.com/login/oauth/access_token"
 # userinfo_url  = "https://api.github.com/user"
-# display_name  = "GitHub"
+# client_id and client_secret injected via env:
+#   NETGOL_OIDC_PROVIDERS__GITHUB__CLIENT_ID
+#   NETGOL_OIDC_PROVIDERS__GITHUB__CLIENT_SECRET

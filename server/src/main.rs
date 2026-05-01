@@ -104,8 +104,8 @@ async fn main() {
         let app = Router::new()
             .route("/ws", get(ws::upgrade))
             .route("/auth/providers", get(auth::providers_list))
-            .route("/auth/:provider", get(auth::start))
-            .route("/auth/:provider/callback", get(auth::callback))
+            .route("/auth/{provider}", get(auth::start))
+            .route("/auth/{provider}/callback", get(auth::callback))
             .with_state(ws_state);
         async move {
             let listener = TcpListener::bind(&bind).await.expect("bind game");

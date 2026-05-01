@@ -62,10 +62,10 @@ impl AuthState {
             .build()
             .expect("build reqwest client");
         let mut clients = HashMap::new();
-        for provider in &cfg.oidc_providers {
-            match build_client(provider, &cfg.base_url).await {
-                Ok(c) => { clients.insert(provider.name.clone(), c); }
-                Err(e) => tracing::error!(provider = %provider.name, err = %e, "provider client build failed"),
+        for (name, provider) in &cfg.oidc_providers {
+            match build_client(name, provider, &cfg.base_url).await {
+                Ok(c) => { clients.insert(name.clone(), c); }
+                Err(e) => tracing::error!(provider = %name, err = %e, "provider client build failed"),
             }
         }
         Self { cfg, user_store, http, clients, pending: Mutex::new(HashMap::new()) }
@@ -76,13 +76,13 @@ impl AuthState {
     }
 }
 
-async fn build_client(provider: &OidcProvider, base_url: &str) -> Result<ProviderClient, String> {
+async fn build_client(name: &str, provider: &OidcProvider, base_url: &str) -> Result<ProviderClient, String> {
     let client_id = provider.client_id.as_deref()
-        .ok_or("client_id missing (set NETGOL_OIDC_PROVIDERS_N__CLIENT_ID)")?;
+        .ok_or_else(|| format!("client_id missing (set NETGOL_OIDC_PROVIDERS__{name}__CLIENT_ID)", name = name.to_uppercase()))?;
     let client_secret = provider.client_secret.as_deref()
-        .ok_or("client_secret missing (set NETGOL_OIDC_PROVIDERS_N__CLIENT_SECRET)")?;
+        .ok_or_else(|| format!("client_secret missing (set NETGOL_OIDC_PROVIDERS__{name}__CLIENT_SECRET)", name = name.to_uppercase()))?;
 
-    let redirect = RedirectUrl::new(provider.redirect_uri(base_url))
+    let redirect = RedirectUrl::new(provider.redirect_uri(base_url, name))
         .map_err(|e| format!("bad redirect_uri: {e}"))?;
 
     if let Some(issuer) = &provider.issuer_url {
@@ -134,10 +134,11 @@ pub type SharedAuthState = Arc<AuthState>;
 pub async fn providers_list(State(auth): State<SharedAuthState>) -> impl IntoResponse {
     #[derive(Serialize)]
     struct Entry { slug: String, name: String }
-    let list: Vec<_> = auth.cfg.oidc_providers.iter()
-        .filter(|p| auth.clients.contains_key(&p.name))
-        .map(|p| Entry { slug: p.name.clone(), name: p.display().to_string() })
+    let mut list: Vec<_> = auth.cfg.oidc_providers.iter()
+        .filter(|(name, _)| auth.clients.contains_key(*name))
+        .map(|(name, p)| Entry { slug: name.clone(), name: p.display(name).to_string() })
         .collect();
+    list.sort_by(|a, b| a.slug.cmp(&b.slug));
     axum::Json(list)
 }
 
