@@ -93,7 +93,7 @@ export class AuthUi {
     this.scheduleFrame();
   }
 
-  private exitClaimMode() {
+  exitClaimMode() {
     this.claimMode = false;
     this.render();
     this.scheduleFrame();

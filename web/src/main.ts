@@ -160,6 +160,19 @@ const onSettle = () => {
   scheduleFrame();
 };
 const controls = createControls(canvas, cam, send, scheduleFrame, onSettle, selection, cache, stampState);
+
+// Intercept canvas pointer events in claim mode before controls see them.
+canvas.addEventListener('mousedown', (e) => {
+  if (!authUi.active) return;
+  e.stopPropagation();
+  e.preventDefault();
+  if (e.button === 0) authUi.commitClaim();
+  else if (e.button === 2) authUi.exitClaimMode();
+}, true);
+canvas.addEventListener('contextmenu', (e) => {
+  if (authUi.active) e.preventDefault();
+}, true);
+
 new StampUi(stampsEl, stampState);
 new Links(linksEl);
 mountIcons();
