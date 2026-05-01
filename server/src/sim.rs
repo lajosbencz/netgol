@@ -10,7 +10,7 @@ use crate::io_task::IoCmd;
 use crate::metrics::Metrics;
 use protocol::{rows_to_bits, EditCell, BITS_BYTES};
 use simulation::{ChunkCoord, Detector, PromoteRequest, TickOutcome, World, CHUNK_SIZE_I64};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -42,14 +42,23 @@ pub struct ChunkSnap {
 #[derive(Debug)]
 pub struct SimEvent {
     pub tick: u64,
-    /// Chunks that changed (or were touched by an edit) this turn, with current state.
+    /// Chunks that changed this turn (natural GoL or post-edit), with current state.
+    /// Used by the hub to keep its mirror up to date. Natural-evolution chunks are
+    /// not broadcast to clients; edit chunks are covered by `edits`.
     pub changed: Vec<ChunkSnap>,
+    /// Per-chunk edit payloads from `SimCmd::Edit` received before this event.
+    /// Hub broadcasts `EditApplied` for each entry. Empty on tick events and the
+    /// initial dump.
+    pub edits: Vec<(ChunkCoord, Vec<EditCell>)>,
     /// Chunks removed (natural emptying or reaper). Hub broadcasts `Reaped` for these.
     pub removed: Vec<ChunkCoord>,
     pub live_count: usize,
     pub compute_duration: Duration,
     /// True only on the very first event (full world dump after boot).
     pub initial: bool,
+    /// True when this event represents a completed GoL tick (vs an immediate
+    /// edit notification). Hub sends `Sync` only on tick events.
+    pub is_tick: bool,
 }
 
 pub struct SimHandles {
@@ -135,10 +144,12 @@ async fn run(
             .send(SimEvent {
                 tick: world.tick_number(),
                 changed: snaps,
+                edits: vec![],
                 removed: vec![],
                 live_count: world.len(),
                 compute_duration: Duration::ZERO,
                 initial: true,
+                is_tick: false,
             })
             .await
             .expect("sim event channel closed before initial dump (hub gone)");
@@ -148,9 +159,7 @@ async fn run(
     let mut ticker = interval(period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    let mut edit_touched: HashSet<ChunkCoord> = HashSet::new();
     let mut outcome = TickOutcome::default();
-    let mut dedup_scratch: HashSet<ChunkCoord> = HashSet::new();
     let mut last_overrun_warn: Option<Instant> = None;
     // Subscribed: coords with >=1 peer observing. Pause-ineligible while present.
     let mut subscribed: HashSet<ChunkCoord> = HashSet::new();
@@ -174,38 +183,40 @@ async fn run(
                         if wakes > 0 {
                             metrics.oscillator_wakes_total.inc_by(wakes);
                         }
+                        // Apply cells and group by chunk for EditApplied broadcast.
+                        let mut cells_by_chunk: HashMap<ChunkCoord, Vec<EditCell>> = HashMap::new();
                         for c in &cells {
                             let ax = i64::from(c.cx) * CHUNK_SIZE_I64 + i64::from(c.lx);
                             let ay = i64::from(c.cy) * CHUNK_SIZE_I64 + i64::from(c.ly);
                             world.set_cell(ax, ay, c.alive);
-                            edit_touched.insert((c.cx, c.cy));
+                            cells_by_chunk.entry((c.cx, c.cy)).or_default().push(*c);
                         }
                         // Durable record before client visibility: WAL append + fsync.
-                        // Sim doesn't block on the fsync - the IO task does it - so
-                        // the only backpressure surfaces if the IO channel fills,
-                        // which panics (see `IO_CMD_CAPACITY`).
                         let now_tick = world.tick_number();
                         io_tx
                             .send(IoCmd::AppendEdits { tick: now_tick, cells })
                             .await
                             .expect("io channel closed during edit append");
-                        // Push immediate event so still-life edits surface on the
-                        // client without waiting for the next tick.
-                        if !edit_touched.is_empty() {
-                            let hint = edit_touched.len();
-                            let snaps = collect(&world, edit_touched.drain(), hint);
-                            event_tx
-                                .send(SimEvent {
-                                    tick: now_tick,
-                                    changed: snaps,
-                                    removed: vec![],
-                                    live_count: world.len(),
-                                    compute_duration: Duration::ZERO,
-                                    initial: false,
-                                })
-                                .await
-                                .expect("sim event channel closed during edit (hub gone)");
-                        }
+                        // Immediate event: lets hub broadcast EditApplied for all
+                        // edited chunks. Also updates the mirror so new subscribers
+                        // on still-life chunks see the current state.
+                        let hint = cells_by_chunk.len();
+                        let snaps = collect(&world, cells_by_chunk.keys().copied(), hint);
+                        let edits: Vec<(ChunkCoord, Vec<EditCell>)> =
+                            cells_by_chunk.into_iter().collect();
+                        event_tx
+                            .send(SimEvent {
+                                tick: now_tick,
+                                changed: snaps,
+                                edits,
+                                removed: vec![],
+                                live_count: world.len(),
+                                compute_duration: Duration::ZERO,
+                                initial: false,
+                                is_tick: false,
+                            })
+                            .await
+                            .expect("sim event channel closed during edit (hub gone)");
                     }
                     SimCmd::Reap(coords) => {
                         // Hub already broadcast `Reaped` to peers before sending
@@ -238,10 +249,12 @@ async fn run(
                                 .send(SimEvent {
                                     tick: now_tick,
                                     changed: snaps,
+                                    edits: vec![],
                                     removed: vec![],
                                     live_count: world.len(),
                                     compute_duration: Duration::ZERO,
                                     initial: false,
+                                    is_tick: false,
                                 })
                                 .await
                                 .expect("sim event channel closed during subscribe wake (hub gone)");
@@ -340,15 +353,6 @@ async fn run(
                         );
                     }
                 }
-                if !edit_touched.is_empty() {
-                    dedup_scratch.clear();
-                    dedup_scratch.extend(outcome.changed.iter().copied());
-                    for c in edit_touched.drain() {
-                        if dedup_scratch.insert(c) {
-                            outcome.changed.push(c);
-                        }
-                    }
-                }
                 let hint = outcome.changed.len();
                 let changed = collect(&world, outcome.changed.iter().copied(), hint);
                 let removed: Vec<ChunkCoord> = outcome.removed.drain(..).collect();
@@ -358,10 +362,12 @@ async fn run(
                     .send(SimEvent {
                         tick: now,
                         changed,
+                        edits: vec![],
                         removed,
                         live_count: world.len(),
                         compute_duration: elapsed,
                         initial: false,
+                        is_tick: true,
                     })
                     .await
                     .expect("sim event channel closed during tick (hub gone)");

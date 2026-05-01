@@ -258,7 +258,7 @@ impl Hub {
         let bytes_at_start = self.metrics.bytes_sent_total.get();
         let msgs_at_start = self.metrics.messages_sent_total.get();
 
-        if !ev.initial {
+        if ev.is_tick {
             for coord in self.chunk_subs.keys() {
                 self.last_seen_tick.insert(*coord, now);
             }
@@ -270,7 +270,11 @@ impl Hub {
             self.broadcast(&ServerMsg::Reaped { cx: coord.0, cy: coord.1 });
         }
 
-        let initial = ev.initial;
+        // Update mirror for all changed chunks; send ChunkDelta for those with live
+        // boundary cells. Boundary-active chunks interact with external neighbors,
+        // so the client cannot simulate them correctly from cached state alone.
+        // Isolated chunks (no live boundary cells) are simulated correctly by the
+        // client's local GoL without any cross-chunk data.
         for snap in ev.changed {
             let coord = snap.coord;
             let bits = snap.bits;
@@ -281,8 +285,7 @@ impl Hub {
                 tick: now,
             });
 
-            // Don't fanout the initial bulk dump - peers receive their slice on subscribe.
-            if initial { continue; }
+            if ev.initial || !has_live_boundary(&bits) { continue; }
 
             self.recipients_scratch.clear();
             match self.chunk_subs.get(&coord) {
@@ -305,8 +308,39 @@ impl Hub {
             }
         }
 
+        // Broadcast edit payloads before Sync so clients patch local state
+        // before their GoL step.
+        if !ev.initial {
+            for (coord, cells) in ev.edits {
+                self.recipients_scratch.clear();
+                match self.chunk_subs.get(&coord) {
+                    Some(subs) if !subs.is_empty() => {
+                        self.recipients_scratch.extend(subs.iter().copied());
+                    }
+                    _ => continue,
+                };
+                let bytes = self.encode_msg(&ServerMsg::EditApplied {
+                    cx: coord.0,
+                    cy: coord.1,
+                    cells,
+                });
+                for i in 0..self.recipients_scratch.len() {
+                    let pid = self.recipients_scratch[i];
+                    if self.send_bytes(pid, bytes.clone()) {
+                        self.metrics.chunk_delta_sent_total.inc();
+                    }
+                }
+            }
+
+            // Sync drives the client GoL step; sent after edits so clients have
+            // the patched state before advancing.
+            if ev.is_tick {
+                self.broadcast(&ServerMsg::Sync { tick: now });
+            }
+        }
+
         // Reaper. Skip on the initial dump (which has no removed-since-last context).
-        if !ev.initial && self.mirror.len() > self.config.max_live_chunks {
+        if ev.is_tick && self.mirror.len() > self.config.max_live_chunks {
             self.reaper_subscribed_scratch.clear();
             for peer in self.peers.values() {
                 self.reaper_subscribed_scratch.extend(peer.subscribed.iter().copied());
@@ -343,7 +377,7 @@ impl Hub {
         }
 
         // Sliding-window rate/util counters only advance on true ticks.
-        if !ev.initial {
+        if ev.is_tick {
             self.compute_in_window += ev.compute_duration;
             self.ticks_in_window += 1;
             self.metrics
@@ -366,8 +400,7 @@ impl Hub {
         }
         self.metrics.live_chunks.set(ev.live_count as i64);
 
-        // Per-tick fan-out summary: max queue depth across peers.
-        if !ev.initial && !self.peers.is_empty() {
+        if ev.is_tick && !self.peers.is_empty() {
             let cap = self.config.peer_outbound_capacity;
             let max_depth = self.peers.values()
                 .map(|p| cap - p.tx.capacity())
@@ -377,7 +410,7 @@ impl Hub {
         }
 
         let heartbeat_every = u64::from(self.config.tick_hz);
-        if !ev.initial && heartbeat_every > 0 && now % heartbeat_every == 0 {
+        if ev.is_tick && heartbeat_every > 0 && now % heartbeat_every == 0 {
             let live_chunks = u32::try_from(self.metrics.live_chunks.get())
                 .expect("live_chunks exceeds u32 (>4B chunks)");
             let stats = ServerMsg::Stats {
@@ -389,7 +422,7 @@ impl Hub {
             self.broadcast(&stats);
         }
 
-        if !ev.initial {
+        if ev.is_tick {
             let bytes_delta = self.metrics.bytes_sent_total.get().saturating_sub(bytes_at_start);
             let msgs_delta = self.metrics.messages_sent_total.get().saturating_sub(msgs_at_start);
             self.metrics.broadcast_bytes_per_tick.observe(bytes_delta as f64);
@@ -476,7 +509,29 @@ fn encode_capacity(msg: &ServerMsg) -> usize {
         ServerMsg::Reaped { .. } => 1 + 4 + 4,
         ServerMsg::Stats { .. } => 1 + 8 + 4 + 4 + 4,
         ServerMsg::Regions { regions } => 1 + 2 + regions.len() * (8 + 8 + 4 + 4 + 1 + 4),
+        ServerMsg::Sync { .. } => 1 + 8,
+        ServerMsg::EditApplied { cells, .. } => 1 + 4 + 4 + 2 + cells.len() * 3,
     }
+}
+
+/// True if any cell in the top row, bottom row, left column, or right column is alive.
+/// Chunks with live boundary cells interact with their neighbors across chunk edges;
+/// clients cannot simulate these correctly without external neighbor data, so the
+/// server must send authoritative `ChunkDelta`s for them.
+fn has_live_boundary(bits: &[u8; BITS_BYTES]) -> bool {
+    // Top row (y=0): bytes 0..8
+    if bits[..8].iter().any(|&b| b != 0) { return true; }
+    // Bottom row (y=63): bytes 504..512 (CHUNK_SIZE-1)*8 = 504
+    if bits[504..].iter().any(|&b| b != 0) { return true; }
+    // Left column (x=0): LSB of byte at y*8; right column (x=63): MSB of byte at y*8+7.
+    // Rows 0 and 63 already checked above; check rows 1..62.
+    for y in 1..CHUNK_SIZE - 1 {
+        let off = y * 8;
+        if (bits[off] & 0x01) | (bits[off + 7] & 0x80) != 0 {
+            return true;
+        }
+    }
+    false
 }
 
 pub async fn join(tx: &mpsc::Sender<HubCmd>) -> Option<JoinAccepted> {

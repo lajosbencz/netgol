@@ -1,9 +1,35 @@
 # syntax=docker/dockerfile:1.7
-# Dev image: vite dev server with HMR. Source is bind-mounted; node_modules
-# stays inside the image so the host platform doesn't matter.
+# Dev image: vite dev server with HMR.
+# WASM is built into the image at /app/wasm/ and is NOT overridden by
+# the ./web/src:/app/src bind-mount, so no host pre-build is needed.
+
+ARG RUST_VERSION=1.95
+
+# ── Stage 1: build WASM ──────────────────────────────────────────────────
+FROM rust:${RUST_VERSION}-slim AS wasm-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo install wasm-pack --version 0.14.0 --locked
+RUN rustup target add wasm32-unknown-unknown
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY simulation/ simulation/
+COPY protocol/Cargo.toml protocol/Cargo.toml
+COPY server/Cargo.toml server/Cargo.toml
+RUN mkdir -p protocol/src server/src \
+    && touch protocol/src/lib.rs server/src/main.rs
+RUN cd simulation \
+    && wasm-pack build --target web --out-dir ../wasm/scalar --features wasm \
+    && RUSTFLAGS="-C target-feature=+simd128" \
+       wasm-pack build --target web --out-dir ../wasm/simd --features wasm
+
+# ── Stage 2: vite dev server ─────────────────────────────────────────────
 FROM node:22-alpine
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
+# WASM lives at /app/wasm/ — not touched by the ./web/src:/app/src mount.
+COPY --from=wasm-builder /build/wasm/ ./wasm/
 EXPOSE 5173
 CMD ["npx", "vite", "--host", "0.0.0.0"]

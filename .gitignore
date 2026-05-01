@@ -3,8 +3,8 @@ target/
 **/*.rs.bk
 Cargo.lock.bak
 
-# wasm build output shipped into web/
-web/src/wasm/
+# wasm build output (outside src/ so dev bind-mounts don't shadow it)
+web/wasm/
 
 # Node / Bun / web
 node_modules/

@@ -10,6 +10,8 @@ const TAG_REAPED = 0x03;
 const TAG_STATS = 0x04;
 const TAG_HELLO = 0x05;
 const TAG_REGIONS = 0x06;
+const TAG_SYNC = 0x07;
+const TAG_EDIT_APPLIED = 0x08;
 const TAG_SUBSCRIBE = 0x10;
 const TAG_UNSUBSCRIBE = 0x11;
 const TAG_EDIT = 0x12;
@@ -29,7 +31,9 @@ export type ServerMsg =
   | { kind: 'ChunkState'; cx: number; cy: number; tick: bigint; bits: Uint8Array }
   | { kind: 'ChunkDelta'; cx: number; cy: number; tick: bigint; bits: Uint8Array }
   | { kind: 'Reaped'; cx: number; cy: number }
-  | { kind: 'Stats'; tick: bigint; liveChunks: number; tickRateHz: number; tickUtilization: number };
+  | { kind: 'Stats'; tick: bigint; liveChunks: number; tickRateHz: number; tickUtilization: number }
+  | { kind: 'Sync'; tick: bigint }
+  | { kind: 'EditApplied'; cx: number; cy: number; cells: EditCell[] };
 
 export type EditCell = { cx: number; cy: number; lx: number; ly: number; alive: boolean };
 
@@ -75,6 +79,17 @@ export function decodeServer(buf: ArrayBuffer): ServerMsg {
         tickRateHz: r.f32(),
         tickUtilization: r.f32(),
       };
+    case TAG_SYNC:
+      return { kind: 'Sync', tick: r.u64() };
+    case TAG_EDIT_APPLIED: {
+      const cx = r.i32(), cy = r.i32(), count = r.u16();
+      const cells: EditCell[] = [];
+      for (let i = 0; i < count; i++) {
+        const lx = r.u8(), ly = r.u8(), alive = r.u8() !== 0;
+        cells.push({ cx, cy, lx, ly, alive });
+      }
+      return { kind: 'EditApplied', cx, cy, cells };
+    }
     default:
       throw new Error(`unknown server tag 0x${tag.toString(16)}`);
   }

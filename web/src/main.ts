@@ -182,8 +182,10 @@ function connect() {
       case 'Hello':
         break;
       case 'ChunkState':
-      case 'ChunkDelta':
         cache.put(msg.cx, msg.cy, msg.tick, msg.bits);
+        break;
+      case 'ChunkDelta':
+        cache.put(msg.cx, msg.cy, msg.tick, msg.bits, true);
         break;
       case 'Regions':
         cache.setRegions(msg.regions);
@@ -195,6 +197,12 @@ function connect() {
         liveChunks = msg.liveChunks;
         tickRateHz = msg.tickRateHz;
         tickUtilization = msg.tickUtilization;
+        break;
+      case 'EditApplied':
+        cache.applyEdit(msg.cx, msg.cy, msg.cells);
+        break;
+      case 'Sync':
+        cache.step(msg.tick);
         break;
     }
     scheduleFrame();

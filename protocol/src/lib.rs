@@ -15,6 +15,8 @@ const TAG_REAPED: u8 = 0x03;
 const TAG_STATS: u8 = 0x04;
 const TAG_HELLO: u8 = 0x05;
 const TAG_REGIONS: u8 = 0x06;
+const TAG_SYNC: u8 = 0x07;
+const TAG_EDIT_APPLIED: u8 = 0x08;
 
 /// Region flags (bitfield, packed into `u8`).
 pub const FLAG_FROZEN: u8 = 1 << 0; // cells inside don't evolve
@@ -54,6 +56,12 @@ pub enum ServerMsg {
         tick_rate_hz: f32,
         tick_utilization: f32,
     },
+    /// Per-tick heartbeat. Clients advance their local simulation on receipt.
+    Sync { tick: u64 },
+    /// Broadcast to chunk subscribers when a player edit is applied. Clients
+    /// patch their local bits then let the next `Sync` drive the GoL step.
+    /// Cells are all in the same chunk (cx, cy); wire encodes only lx/ly/alive.
+    EditApplied { cx: i32, cy: i32, cells: Vec<EditCell> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +141,22 @@ pub fn encode_server(msg: &ServerMsg, out: &mut Vec<u8>) {
             out.extend_from_slice(&tick_rate_hz.to_le_bytes());
             out.extend_from_slice(&tick_utilization.to_le_bytes());
         }
+        ServerMsg::Sync { tick } => {
+            out.push(TAG_SYNC);
+            out.extend_from_slice(&tick.to_le_bytes());
+        }
+        ServerMsg::EditApplied { cx, cy, cells } => {
+            out.push(TAG_EDIT_APPLIED);
+            out.extend_from_slice(&cx.to_le_bytes());
+            out.extend_from_slice(&cy.to_le_bytes());
+            let n = u16::try_from(cells.len()).expect("edit list >= 65536 cells");
+            out.extend_from_slice(&n.to_le_bytes());
+            for c in cells {
+                out.push(c.lx);
+                out.push(c.ly);
+                out.push(u8::from(c.alive));
+            }
+        }
     }
 }
 
@@ -174,6 +198,23 @@ pub fn decode_server(buf: &[u8]) -> Result<ServerMsg, DecodeError> {
             tick_rate_hz: r.f32()?,
             tick_utilization: r.f32()?,
         }),
+        TAG_SYNC => Ok(ServerMsg::Sync { tick: r.u64()? }),
+        TAG_EDIT_APPLIED => {
+            let cx = r.i32()?;
+            let cy = r.i32()?;
+            let n = r.u16()? as usize;
+            let mut cells = Vec::with_capacity(n);
+            for _ in 0..n {
+                let lx = r.u8()?;
+                let ly = r.u8()?;
+                let alive = r.u8()? != 0;
+                if (lx as usize) >= CHUNK_SIZE || (ly as usize) >= CHUNK_SIZE {
+                    return Err(DecodeError::BadLocalCoord);
+                }
+                cells.push(EditCell { cx, cy, lx, ly, alive });
+            }
+            Ok(ServerMsg::EditApplied { cx, cy, cells })
+        }
         t => Err(DecodeError::UnknownTag(t)),
     }
 }
@@ -354,6 +395,12 @@ mod tests {
             ]) },
             ServerMsg::Reaped { cx: 0, cy: -1 },
             ServerMsg::Stats { tick: 42, live_chunks: 1234, tick_rate_hz: 9.994, tick_utilization: 0.087 },
+            ServerMsg::Sync { tick: u64::MAX },
+            ServerMsg::EditApplied { cx: -3, cy: 7, cells: vec![
+                EditCell { cx: -3, cy: 7, lx: 0, ly: 0, alive: true },
+                EditCell { cx: -3, cy: 7, lx: 63, ly: 63, alive: false },
+            ]},
+            ServerMsg::EditApplied { cx: 0, cy: 0, cells: vec![] },
         ];
         for msg in &cases {
             let mut buf = Vec::new();

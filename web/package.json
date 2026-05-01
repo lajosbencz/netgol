@@ -4,8 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "build:wasm:scalar": "cd ../simulation && wasm-pack build --target web --out-dir ../web/wasm/scalar --features wasm",
+    "build:wasm:simd": "cd ../simulation && RUSTFLAGS='-C target-feature=+simd128' wasm-pack build --target web --out-dir ../web/wasm/simd --features wasm",
+    "build:wasm": "npm run build:wasm:scalar && npm run build:wasm:simd",
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "npm run build:wasm && tsc && vite build",
     "preview": "vite preview"
   },
   "devDependencies": {

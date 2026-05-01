@@ -90,14 +90,11 @@ export class Subscription {
 
     this.current = next;
 
-    // Size the cache to the current viewport+halo plus a buffer so a quick pan-
-    // back doesn't re-fetch a just-unsubscribed chunk (Subscribe → ChunkState is
-    // ~100ms; during the gap the chunk would render as background).
-    // The cache LRU evicts the oldest entries automatically once we exceed cap.
     this.cache.setCapacity(next.size + CACHE_BUFFER);
 
     if (toUnsub.length > 0) {
       this.send(encodeClient({ kind: 'Unsubscribe', coords: toUnsub }));
+      for (const [cx, cy] of toUnsub) this.cache.drop(cx, cy);
     }
     if (toSub.length > 0) this.send(encodeClient({ kind: 'Subscribe', coords: toSub }));
   }

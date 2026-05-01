@@ -5,10 +5,66 @@
 // Per-chunk frozen masks are materialised locally from the region table the
 // server sends in `Regions`. They're not on the per-chunk wire frame.
 
-import { CHUNK_SIZE, BITS_BYTES, FLAG_FROZEN, Region } from './protocol';
-
+import { CHUNK_SIZE, BITS_BYTES, FLAG_FROZEN, Region, EditCell } from './protocol';
 export type ChunkKey = string;
 export const key = (cx: number, cy: number): ChunkKey => `${cx},${cy}`;
+
+// ---------------------------------------------------------------------------
+// WASM GoL kernel. Edge-bundle wire format (33 bytes):
+//   [0..8]   top row    [8..16]  bottom row
+//   [16..24] left col   [24..32] right col
+//   [32]     corners    bit0=TL  bit1=TR  bit2=BL  bit3=BR
+// ---------------------------------------------------------------------------
+
+// Probe: minimal WASM binary using v128.const — validates iff SIMD128 is supported.
+const SIMD_SUPPORTED = WebAssembly.validate(new Uint8Array([
+  0x00,0x61,0x73,0x6d, 0x01,0x00,0x00,0x00, // magic + version
+  0x01,0x05,0x01,0x60,0x00,0x01,0x7b,        // type: () -> v128
+  0x03,0x02,0x01,0x00,                        // function section
+  0x0a,0x16,0x01,0x14,0x00,                  // code section
+  0xfd,0x0c,                                  // v128.const
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+  0x0b,                                       // end
+]));
+
+type WasmFn = { chunk_edges: (b: Uint8Array) => Uint8Array; step_chunk: (b: Uint8Array, h: Uint8Array, f: Uint8Array) => Uint8Array };
+let wasm: WasmFn;
+
+if (SIMD_SUPPORTED) {
+  const m = await import('../wasm/simd/simulation.js');
+  await m.default();
+  wasm = m;
+} else {
+  const m = await import('../wasm/scalar/simulation.js');
+  await m.default();
+  wasm = m;
+}
+
+const { chunk_edges, step_chunk } = wasm;
+
+const DEAD_EDGE = new Uint8Array(33);
+
+// Assemble a 33-byte halo from the 8 pre-computed neighbor edge bundles.
+// This is pure byte arithmetic; the actual GoL step runs in WASM.
+function assembleHalo(
+  above: Uint8Array, below: Uint8Array,
+  leftN: Uint8Array, rightN: Uint8Array,
+  tl: Uint8Array, tr: Uint8Array, bl: Uint8Array, br: Uint8Array,
+): Uint8Array {
+  const h = new Uint8Array(33);
+  h.set(above.subarray(8, 16), 0);    // top    = above.bottom
+  h.set(below.subarray(0, 8),  8);    // bottom = below.top
+  h.set(leftN.subarray(24, 32), 16);  // left   = leftN.right
+  h.set(rightN.subarray(16, 24), 24); // right  = rightN.left
+  // TL=BR(tl), TR=BL(tr), BL=TR(bl), BR=TL(br)
+  h[32] = ((tl[32] >> 3) & 1)
+        | (((tr[32] >> 2) & 1) << 1)
+        | (((bl[32] >> 1) & 1) << 2)
+        | ((br[32] & 1) << 3);
+  return h;
+}
+
 
 export type ChunkEntry = {
   cx: number;
@@ -35,6 +91,12 @@ export class ChunkCache {
   private scratch: ImageData | null = null;
   /** Most recent region table from the server; used to derive per-chunk frozen masks. */
   private regions: Region[] = [];
+  /**
+   * Chunks that received a server-authoritative `ChunkDelta` this tick.
+   * These are already at the correct post-GoL state; `step()` must skip them
+   * to avoid double-advancing the simulation.
+   */
+  private updatedThisTick = new Set<ChunkKey>();
 
   constructor(private capacity: number, private palette: Palette) {}
 
@@ -59,7 +121,12 @@ export class ChunkCache {
 
   size(): number { return this.map.size; }
 
-  put(cx: number, cy: number, tick: bigint, bits: Uint8Array) {
+  /**
+   * @param authoritative - true for `ChunkDelta` (server already ran GoL this tick;
+   *   skip local GoL step and paint immediately). false for `ChunkState` (seed state;
+   *   defer first paint until after the first GoL step so boundary cells integrate).
+   */
+  put(cx: number, cy: number, tick: bigint, bits: Uint8Array, authoritative = false) {
     if (bits.length !== BITS_BYTES) throw new Error('bad bits length');
     const k = key(cx, cy);
     let entry = this.map.get(k);
@@ -73,6 +140,7 @@ export class ChunkCache {
     }
     this.repaint(entry);
     this.map.set(k, entry);
+    if (authoritative) this.updatedThisTick.add(k);
     this.evictIfNeeded();
   }
 
@@ -83,9 +151,66 @@ export class ChunkCache {
     ctx.putImageData(this.scratch, 0, 0);
   }
 
-  drop(cx: number, cy: number) { this.map.delete(key(cx, cy)); }
+  drop(cx: number, cy: number) {
+    const k = key(cx, cy);
+    this.map.delete(k);
+    this.updatedThisTick.delete(k);
+  }
 
-  clear() { this.map.clear(); }
+  clear() {
+    this.map.clear();
+    this.updatedThisTick.clear();
+  }
+
+  /** Apply a set of cell edits to a cached chunk without running a GoL step.
+   *  Called when `EditApplied` arrives; the GoL step happens on the next `Sync`. */
+  applyEdit(cx: number, cy: number, cells: EditCell[]) {
+    const entry = this.map.get(key(cx, cy));
+    if (!entry) return;
+    for (const c of cells) {
+      const byteIdx = c.ly * 8 + (c.lx >> 3);
+      const mask = 1 << (c.lx & 7);
+      if (c.alive) {
+        entry.bits[byteIdx] |= mask;
+      } else {
+        entry.bits[byteIdx] &= ~mask;
+      }
+    }
+    this.repaint(entry);
+  }
+
+  /** Advance all cached chunks by one GoL step. Called on `Sync`.
+   *  Chunks that received a `ChunkDelta` this tick are already at the correct
+   *  post-GoL state and are skipped. Edges are snapshotted from the pre-step
+   *  state before any chunk is mutated, matching the server's tick_into approach. */
+  step(tick: bigint) {
+    const skip = this.updatedThisTick;
+    this.updatedThisTick = new Set<ChunkKey>();
+
+    // Snapshot edges (WASM) for all entries before mutating any bits.
+    const edgeMap = new Map<ChunkKey, Uint8Array>();
+    for (const entry of this.map.values()) {
+      edgeMap.set(key(entry.cx, entry.cy), chunk_edges(entry.bits));
+    }
+
+    const nb = (dcx: number, dcy: number, cx: number, cy: number): Uint8Array =>
+      edgeMap.get(key(cx + dcx, cy + dcy)) ?? DEAD_EDGE;
+
+    for (const entry of this.map.values()) {
+      const k = key(entry.cx, entry.cy);
+      entry.tick = tick;
+      if (skip.has(k)) continue;
+      const { cx, cy } = entry;
+      const halo = assembleHalo(
+        nb(0, -1, cx, cy), nb(0, 1, cx, cy),
+        nb(-1, 0, cx, cy), nb(1, 0, cx, cy),
+        nb(-1, -1, cx, cy), nb(1, -1, cx, cy),
+        nb(-1, 1, cx, cy),  nb(1, 1, cx, cy),
+      );
+      entry.bits = step_chunk(entry.bits, halo, entry.frozenMask ?? new Uint8Array(0));
+      this.repaint(entry);
+    }
+  }
 
   private evictIfNeeded() {
     while (this.map.size > this.capacity) {
