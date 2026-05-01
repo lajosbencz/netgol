@@ -96,6 +96,12 @@ pub fn load(world: &mut World, path: &Path) -> Vec<Region> {
         out.push(region);
     }
 
+    for r in &out {
+        tracing::info!(
+            x = r.x, y = r.y, w = r.w, h = r.h, flags = r.flags,
+            "region"
+        );
+    }
     tracing::info!(regions = out.len(), live_cells = total_cells, "loaded regions");
     out
 }
