@@ -21,7 +21,6 @@ export class AuthUi {
   private providers: Provider[] = [];
   private providersLoaded = false;
   private modal: HTMLElement | null = null;
-  private onChange: (() => void) | null = null;
 
   constructor(
     private container: HTMLElement,
@@ -53,12 +52,15 @@ export class AuthUi {
     this.scheduleFrame();
   }
 
-  setOnChange(cb: () => void) { this.onChange = cb; }
-
   get active(): boolean { return this.claimMode; }
 
   get cursorChunk(): { cx: number; cy: number } | null {
     return this.claimMode ? { cx: this.cursorCx, cy: this.cursorCy } : null;
+  }
+
+  get claimPreview(): { cursorCx: number; cursorCy: number; claimW: number; claimH: number } | null {
+    if (!this.claimMode) return null;
+    return { cursorCx: this.cursorCx, cursorCy: this.cursorCy, claimW: this.claimW, claimH: this.claimH };
   }
 
   setHover(worldX: number, worldY: number) {
@@ -82,13 +84,15 @@ export class AuthUi {
   }
 
   onClaimResult(ok: boolean) {
-    if (!ok) this.render(); // revert button state if failed
+    if (!ok) {
+      console.warn('claim rejected by server');
+      this.render();
+    }
   }
 
   private enterClaimMode() {
     this.claimMode = true;
     this.cam.zoom = ZOOM_MIN;
-    this.onChange?.();
     this.render();
     this.scheduleFrame();
   }
@@ -154,7 +158,6 @@ export class AuthUi {
 
   private renderAnonymous() {
     if (this.claimMode) return;
-    // Hide until providers are loaded; suppress entirely if none are configured.
     if (!this.providersLoaded || this.providers.length === 0) return;
     const btn = document.createElement('button');
     btn.className = 'leave-mark-btn';

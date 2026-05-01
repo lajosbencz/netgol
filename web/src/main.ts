@@ -1,7 +1,7 @@
 import { decodeServer, ServerMsg } from './protocol';
 import { Camera } from './viewport';
 import { ChunkCache, parseRgba, Palette } from './world';
-import { Renderer, ClaimPreview } from './render';
+import { Renderer } from './render';
 import { Subscription } from './subscription';
 import { createControls } from './controls';
 import { Hud, ConnState } from './ui';
@@ -50,12 +50,6 @@ const urlSync = new UrlSync(cam);
 const cache = new ChunkCache(512, palette);
 const renderer = new Renderer(canvas, BG, ALIVE, ACCENT, OWNED_ALIVE_CSS);
 
-let claimW = 3;
-let claimH = 2;
-// sendFn is a stable reference that delegates to `send` once it is defined below.
-let _sendRef: ((b: Uint8Array) => void) | null = null;
-const sendFn = (b: Uint8Array) => _sendRef?.(b);
-const authUi = new AuthUi(authEl, sendFn, cam, claimW, claimH, scheduleFrame);
 const hud = new Hud(statsEl);
 const selection = new Selection();
 const stampState = new StampState();
@@ -92,11 +86,7 @@ function frame() {
   const hover = controls.hoverCell();
   if (hover) authUi.setHover(hover.x, hover.y);
   const ghost = stamp && hover ? { stamp, x: hover.x, y: hover.y } : null;
-  const cursor = authUi.cursorChunk;
-  const claimPreview: ClaimPreview = authUi.active && cursor
-    ? { cursorCx: cursor.cx, cursorCy: cursor.cy, claimW, claimH }
-    : null;
-  renderer.render(cam, cache, selection, ghost, claimPreview);
+  renderer.render(cam, cache, selection, ghost, authUi.claimPreview);
   urlSync.tick();
   hud.set({
     conn: connState(),
@@ -152,8 +142,8 @@ const send = (bytes: Uint8Array) => {
   new Uint8Array(ab).set(bytes);
   ws.send(ab);
 };
-_sendRef = send;
 
+const authUi = new AuthUi(authEl, send, cam, 3, 2, scheduleFrame);
 const subscription = new Subscription(send, cache);
 const onSettle = () => {
   subscription.flush();
