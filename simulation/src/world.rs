@@ -36,7 +36,7 @@ impl Hasher for CoordHasher {
     }
 }
 
-pub(crate) type CoordMap<V> = HashMap<ChunkCoord, V, BuildHasherDefault<CoordHasher>>;
+pub type CoordMap<V> = HashMap<ChunkCoord, V, BuildHasherDefault<CoordHasher>>;
 type CoordSet = HashSet<ChunkCoord, BuildHasherDefault<CoordHasher>>;
 
 /// A group of 2+ chunks that collectively form an oscillating pattern straddling
@@ -59,6 +59,10 @@ pub struct World {
     /// Each member coord maps to (shared group, member index into group.members).
     groups: CoordMap<(Arc<OscillatorGroup>, u8)>,
     tick: u64,
+    /// Chunks claimed by users; these reject inbound edges from non-owned neighbours.
+    owned_chunks: CoordMap<()>,
+    /// Cached `!owned_chunks.is_empty()` — zero-cost fast path when no claims exist.
+    has_owned: bool,
     /// Start-of-tick snapshot: halo assembly must not see mid-tick mutations
     /// from earlier candidates in the loop. Cleared (capacity retained) per tick.
     scratch_edges: CoordMap<EdgeBundle>,
@@ -102,6 +106,13 @@ impl World {
                     .get(&coord)
                     .map(|(g, idx)| &g.members[*idx as usize].1)
             })
+    }
+
+    /// Replace the owned-chunk set. Owned chunks reject inbound halo edges from
+    /// non-owned neighbours, preventing external births into claimed regions.
+    pub fn set_owned_chunks(&mut self, owned: CoordMap<()>) {
+        self.has_owned = !owned.is_empty();
+        self.owned_chunks = owned;
     }
 
     /// Freeze every cell in the axis-aligned rectangle at its current live
@@ -461,7 +472,19 @@ impl World {
             let coord = self.scratch_candidates_vec[i];
             let result = {
                 let current = self.chunks.get(&coord).unwrap_or(&empty_chunk);
-                let halo = assemble_halo(coord, &self.scratch_edges);
+                let halo = if self.has_owned && self.owned_chunks.contains_key(&coord) {
+                    let owned = &self.owned_chunks;
+                    let edges = &self.scratch_edges;
+                    assemble_halo_with(coord, |c| {
+                        if owned.contains_key(&c) {
+                            edges.get(&c).copied().unwrap_or_else(EdgeBundle::empty)
+                        } else {
+                            EdgeBundle::empty()
+                        }
+                    })
+                } else {
+                    assemble_halo(coord, &self.scratch_edges)
+                };
                 current.step(&halo)
             };
             let next = match result {

@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::io_task::IoCmd;
 use crate::metrics::Metrics;
 use protocol::{rows_to_bits, EditCell, BITS_BYTES};
-use simulation::{ChunkCoord, Detector, PromoteRequest, TickOutcome, World, CHUNK_SIZE_I64};
+use simulation::{ChunkCoord, CoordMap, Detector, PromoteRequest, TickOutcome, World, CHUNK_SIZE_I64};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,6 +27,9 @@ pub enum SimCmd {
     /// Coords no longer observed by any peer (1->0 transitions). Pausing
     /// becomes eligible again on the next detector promotion.
     Unsubscribe(Vec<ChunkCoord>),
+    /// Replace the owned-chunk set. Owned chunks reject inbound edges from
+    /// non-owned neighbours, preventing external births into claimed regions.
+    SetOwned(CoordMap<()>),
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +267,9 @@ async fn run(
                         for coord in coords {
                             subscribed.remove(&coord);
                         }
+                    }
+                    SimCmd::SetOwned(owned) => {
+                        world.set_owned_chunks(owned);
                     }
                 }
             }

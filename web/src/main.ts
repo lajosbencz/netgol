@@ -1,7 +1,7 @@
 import { decodeServer, ServerMsg } from './protocol';
 import { Camera } from './viewport';
 import { ChunkCache, parseRgba, Palette } from './world';
-import { Renderer } from './render';
+import { Renderer, ClaimPreview } from './render';
 import { Subscription } from './subscription';
 import { createControls } from './controls';
 import { Hud, ConnState } from './ui';
@@ -12,27 +12,34 @@ import { ControlsUi } from './controls_ui';
 import { applyUrlToCamera, UrlSync } from './url_sync';
 import { mountIcons } from './icons';
 import { Links } from './links';
+import { AuthUi, AuthInfo, Provider } from './auth_ui';
 
 const styles = getComputedStyle(document.documentElement);
 const cssVar = (name: string, fallback: string) =>
   styles.getPropertyValue(name).trim() || fallback;
-const BG = cssVar('--bg', '#0f1729');
-const ALIVE = cssVar('--alive', '#c8ccd4');
-const FROZEN_ALIVE = cssVar('--frozen-alive', '#d4a574');
-const FROZEN_DEAD = cssVar('--frozen-dead', '#1f2940');
-const ACCENT = cssVar('--accent', '#4a7fb8');
+const BG           = cssVar('--bg',           '#0f1729');
+const ALIVE        = cssVar('--alive',         '#8895ad');
+const FROZEN_ALIVE = cssVar('--frozen-alive',  '#4979c2');
+const FROZEN_DEAD  = cssVar('--frozen-dead',   '#0e182c');
+const ACCENT       = cssVar('--accent',        '#4a7fb8');
+const OWNED_ALIVE  = cssVar('--owned-alive',   '#4477c8');
+const OWNED_DEAD   = cssVar('--owned-dead',    '#0d1828');
 
 const palette: Palette = {
   alive: parseRgba(ALIVE),
   frozenAlive: parseRgba(FROZEN_ALIVE),
   frozenDead: parseRgba(FROZEN_DEAD),
+  ownedAlive: parseRgba(OWNED_ALIVE),
+  ownedDead: parseRgba(OWNED_DEAD),
 };
+const OWNED_ALIVE_CSS = OWNED_ALIVE;
 
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
 const statsEl = document.getElementById('stats') as HTMLElement;
 const stampsEl = document.getElementById('stamps') as HTMLElement;
 const controlsEl = document.getElementById('controls') as HTMLElement;
 const linksEl = document.getElementById('links') as HTMLElement;
+const authEl = document.getElementById('auth') as HTMLElement;
 
 const cam: Camera = { x: 0, y: 0, zoom: 3 };
 applyUrlToCamera(cam);
@@ -41,7 +48,14 @@ const urlSync = new UrlSync(cam);
 // any reasonable viewport+halo (a 32x32 chunk grid at extreme zoom is the cap), so the
 // LRU only kicks in after sustained panning across distinct world regions.
 const cache = new ChunkCache(512, palette);
-const renderer = new Renderer(canvas, BG, ALIVE, ACCENT);
+const renderer = new Renderer(canvas, BG, ALIVE, ACCENT, OWNED_ALIVE_CSS);
+
+let claimW = 3;
+let claimH = 2;
+// sendFn is a stable reference that delegates to `send` once it is defined below.
+let _sendRef: ((b: Uint8Array) => void) | null = null;
+const sendFn = (b: Uint8Array) => _sendRef?.(b);
+const authUi = new AuthUi(authEl, sendFn, cam, claimW, claimH, scheduleFrame);
 const hud = new Hud(statsEl);
 const selection = new Selection();
 const stampState = new StampState();
@@ -76,8 +90,13 @@ function frame() {
   subscription.request(cam, rect.width, rect.height);
   const stamp = stampState.active();
   const hover = controls.hoverCell();
+  if (hover) authUi.setHover(hover.x, hover.y);
   const ghost = stamp && hover ? { stamp, x: hover.x, y: hover.y } : null;
-  renderer.render(cam, cache, selection, ghost);
+  const cursor = authUi.cursorChunk;
+  const claimPreview: ClaimPreview = authUi.active && cursor
+    ? { cursorCx: cursor.cx, cursorCy: cursor.cy, claimW, claimH }
+    : null;
+  renderer.render(cam, cache, selection, ghost, claimPreview);
   urlSync.tick();
   hud.set({
     conn: connState(),
@@ -133,6 +152,7 @@ const send = (bytes: Uint8Array) => {
   new Uint8Array(ab).set(bytes);
   ws.send(ab);
 };
+_sendRef = send;
 
 const subscription = new Subscription(send, cache);
 const onSettle = () => {
@@ -204,10 +224,24 @@ function connect() {
       case 'Sync':
         cache.step(msg.tick);
         break;
+      case 'AuthState': {
+        const info: AuthInfo = { uid: msg.uid, name: msg.name, email: msg.email, claim: msg.claim };
+        authUi.setAuth(msg.uid !== 0 ? info : null);
+        break;
+      }
+      case 'ClaimResult':
+        authUi.onClaimResult(msg.ok);
+        break;
     }
     scheduleFrame();
   });
 }
+
+// Fetch provider list once; non-critical if it fails.
+fetch('/auth/providers')
+  .then(r => r.json())
+  .then((providers: Provider[]) => authUi.setProviders(providers))
+  .catch(() => {});
 
 connect();
 

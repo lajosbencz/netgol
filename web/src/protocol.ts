@@ -12,11 +12,16 @@ const TAG_HELLO = 0x05;
 const TAG_REGIONS = 0x06;
 const TAG_SYNC = 0x07;
 const TAG_EDIT_APPLIED = 0x08;
+const TAG_AUTH_STATE = 0x09;
+const TAG_CLAIM_RESULT = 0x0A;
 const TAG_SUBSCRIBE = 0x10;
 const TAG_UNSUBSCRIBE = 0x11;
 const TAG_EDIT = 0x12;
+const TAG_CLAIM_CREATE = 0x13;
+const TAG_CLAIM_DELETE = 0x14;
 
 export const FLAG_FROZEN = 1 << 0;
+export const FLAG_OWNED  = 1 << 2;
 
 export type Region = {
   x: bigint; y: bigint;
@@ -33,14 +38,18 @@ export type ServerMsg =
   | { kind: 'Reaped'; cx: number; cy: number }
   | { kind: 'Stats'; tick: bigint; liveChunks: number; tickRateHz: number; tickUtilization: number }
   | { kind: 'Sync'; tick: bigint }
-  | { kind: 'EditApplied'; cx: number; cy: number; cells: EditCell[] };
+  | { kind: 'EditApplied'; cx: number; cy: number; cells: EditCell[] }
+  | { kind: 'AuthState'; uid: number; claim: [number, number] | null; name: string; email: string }
+  | { kind: 'ClaimResult'; ok: boolean };
 
 export type EditCell = { cx: number; cy: number; lx: number; ly: number; alive: boolean };
 
 export type ClientMsg =
   | { kind: 'Subscribe'; coords: Array<[number, number]> }
   | { kind: 'Unsubscribe'; coords: Array<[number, number]> }
-  | { kind: 'Edit'; cells: EditCell[] };
+  | { kind: 'Edit'; cells: EditCell[] }
+  | { kind: 'ClaimCreate'; cx: number; cy: number }
+  | { kind: 'ClaimDelete' };
 
 export function decodeServer(buf: ArrayBuffer): ServerMsg {
   const r = new Reader(buf);
@@ -90,6 +99,19 @@ export function decodeServer(buf: ArrayBuffer): ServerMsg {
       }
       return { kind: 'EditApplied', cx, cy, cells };
     }
+    case TAG_AUTH_STATE: {
+      const uid = r.u32();
+      const hasClaim = r.u8() !== 0;
+      const claimCx = r.i32(), claimCy = r.i32();
+      const claim: [number, number] | null = hasClaim ? [claimCx, claimCy] : null;
+      const nameLen = r.u16();
+      const name = new TextDecoder().decode(r.bytes(nameLen));
+      const emailLen = r.u16();
+      const email = new TextDecoder().decode(r.bytes(emailLen));
+      return { kind: 'AuthState', uid, claim, name, email };
+    }
+    case TAG_CLAIM_RESULT:
+      return { kind: 'ClaimResult', ok: r.u8() !== 0 };
     default:
       throw new Error(`unknown server tag 0x${tag.toString(16)}`);
   }
@@ -108,6 +130,10 @@ export function encodeClient(msg: ClientMsg): Uint8Array {
         w.i32(c.cx); w.i32(c.cy); w.u8(c.lx); w.u8(c.ly); w.u8(c.alive ? 1 : 0);
       }
       break;
+    case 'ClaimCreate':
+      w.u8(TAG_CLAIM_CREATE); w.i32(msg.cx); w.i32(msg.cy); break;
+    case 'ClaimDelete':
+      w.u8(TAG_CLAIM_DELETE); break;
   }
   return w.finish();
 }

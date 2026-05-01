@@ -2,6 +2,7 @@
 //! mirror. Receives [`SimEvent`]s from the simulation task; routes [`SimCmd::Edit`] /
 //! [`SimCmd::Reap`] back. Never touches the [`simulation::World`].
 
+use crate::claims::ClaimManager;
 use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::reaper::{self, ReapInfo};
@@ -18,11 +19,20 @@ use tokio::sync::{mpsc, oneshot};
 pub type PeerId = u64;
 pub type Outbound = mpsc::Sender<Bytes>;
 
+#[derive(Debug, Clone)]
+pub struct PeerUser {
+    pub uid: u32,
+    pub email_key: String,
+}
+
 #[derive(Debug)]
 pub enum HubCmd {
     Join { reply: oneshot::Sender<JoinAccepted> },
     Leave { peer_id: PeerId },
     Client { peer_id: PeerId, msg: ClientMsg },
+    AuthPeer { peer_id: PeerId, user: PeerUser },
+    ClaimCreate { peer_id: PeerId, coord: ChunkCoord },
+    ClaimDelete { peer_id: PeerId },
 }
 
 #[derive(Debug)]
@@ -51,10 +61,13 @@ pub fn spawn(
     cfg: Config,
     sim_cmd_tx: mpsc::Sender<SimCmd>,
     sim_event_rx: mpsc::Receiver<SimEvent>,
-    regions: Arc<[Region]>,
+    static_regions: Arc<[Region]>,
+    claim_mgr: ClaimManager,
     metrics: Arc<Metrics>,
 ) -> mpsc::Sender<HubCmd> {
     let (tx, rx) = mpsc::channel(1024);
+    let regions = claim_mgr.build_regions(&static_regions);
+    let owned_chunk_set = claim_mgr.owned_chunk_set();
     let hub = Hub {
         config: cfg,
         sim_cmd_tx,
@@ -62,6 +75,10 @@ pub fn spawn(
         chunk_subs: HashMap::new(),
         last_seen_tick: HashMap::new(),
         mirror: HashMap::new(),
+        static_regions,
+        claim_mgr,
+        peer_user: HashMap::new(),
+        owned_chunk_set,
         regions,
         next_peer_id: 1,
         metrics,
@@ -86,6 +103,14 @@ struct Hub {
     chunk_subs: HashMap<ChunkCoord, HashSet<PeerId>>,
     last_seen_tick: HashMap<ChunkCoord, u64>,
     mirror: HashMap<ChunkCoord, MirrorEntry>,
+    /// Immutable static regions from regions.toml.
+    static_regions: Arc<[Region]>,
+    claim_mgr: ClaimManager,
+    /// Per-peer authenticated user info.
+    peer_user: HashMap<PeerId, PeerUser>,
+    /// Chunk coords covered by any claim; used to bypass has_live_boundary opt.
+    owned_chunk_set: HashSet<ChunkCoord>,
+    /// Combined static + claim regions broadcast to clients.
     regions: Arc<[Region]>,
     next_peer_id: PeerId,
     metrics: Arc<Metrics>,
@@ -155,6 +180,15 @@ impl Hub {
             }
             HubCmd::Leave { peer_id } => self.drop_peer(peer_id),
             HubCmd::Client { peer_id, msg } => self.handle_client_msg(peer_id, msg).await,
+            HubCmd::AuthPeer { peer_id, user } => {
+                self.peer_user.insert(peer_id, user);
+            }
+            HubCmd::ClaimCreate { peer_id, coord } => {
+                self.handle_claim_create(peer_id, coord).await;
+            }
+            HubCmd::ClaimDelete { peer_id } => {
+                self.handle_claim_delete(peer_id).await;
+            }
         }
     }
 
@@ -234,11 +268,11 @@ impl Hub {
                 }
             }
             ClientMsg::Edit(cells) => {
-                // Filter out cells inside locked regions before forwarding.
+                let editor_uid = self.peer_user.get(&peer_id).map(|u| u.uid);
                 let allowed: Vec<_> = cells.into_iter().filter(|c| {
                     let ax = i64::from(c.cx) * CHUNK_SIZE_I64 + i64::from(c.lx);
                     let ay = i64::from(c.cy) * CHUNK_SIZE_I64 + i64::from(c.ly);
-                    !region::is_locked(&self.regions, ax, ay)
+                    region::can_edit(&self.regions, ax, ay, editor_uid)
                 }).collect();
                 if !allowed.is_empty() {
                     self.metrics.edits_total.inc_by(allowed.len() as u64);
@@ -248,6 +282,8 @@ impl Hub {
                         .expect("sim cmd channel closed (sim task gone)");
                 }
             }
+            // Intercepted by ws task before reaching hub; unreachable in practice.
+            ClientMsg::ClaimCreate(_) | ClientMsg::ClaimDelete => {}
         }
     }
 
@@ -285,7 +321,7 @@ impl Hub {
                 tick: now,
             });
 
-            if ev.initial || !has_live_boundary(&bits) { continue; }
+            if ev.initial || (!has_live_boundary(&bits) && !self.owned_chunk_set.contains(&coord)) { continue; }
 
             self.recipients_scratch.clear();
             match self.chunk_subs.get(&coord) {
@@ -484,6 +520,7 @@ impl Hub {
                 }
             }
         }
+        self.peer_user.remove(&peer_id);
         self.metrics.client_sessions.set(self.peers.len() as i64);
     }
 
@@ -493,6 +530,64 @@ impl Hub {
         if let Err(e) = self.sim_cmd_tx.send(SimCmd::Unsubscribe(coords)).await {
             tracing::error!(err = %e, "sim cmd channel closed during pending unsubscribe flush");
         }
+    }
+
+    /// Rebuild region list + owned sets, notify sim, broadcast TAG_REGIONS to all.
+    async fn apply_claims_update(&mut self) {
+        self.regions = self.claim_mgr.build_regions(&self.static_regions);
+        self.owned_chunk_set = self.claim_mgr.owned_chunk_set();
+        let owned = self.claim_mgr.owned_coord_map();
+        if let Err(e) = self.sim_cmd_tx.send(SimCmd::SetOwned(owned)).await {
+            tracing::error!(err = %e, "sim cmd closed during SetOwned");
+        }
+        let msg = ServerMsg::Regions { regions: Arc::clone(&self.regions) };
+        self.broadcast(&msg);
+    }
+
+    fn auth_state_for(&self, peer_id: PeerId) -> ServerMsg {
+        let Some(user) = self.peer_user.get(&peer_id) else {
+            return ServerMsg::AuthState { uid: 0, claim: None, name: String::new(), email: String::new() };
+        };
+        ServerMsg::AuthState {
+            uid: user.uid,
+            claim: self.claim_mgr.find_for_user(user.uid),
+            // Name/email not stored in hub; ws sends the full initial AuthState from disk.
+            name: String::new(),
+            email: String::new(),
+        }
+    }
+
+    async fn handle_claim_create(&mut self, peer_id: PeerId, coord: ChunkCoord) {
+        let Some(user) = self.peer_user.get(&peer_id).cloned() else {
+            self.send_to(peer_id, &ServerMsg::ClaimResult { ok: false });
+            return;
+        };
+        let (cx, cy) = coord;
+        if !self.claim_mgr.try_create(user.uid, cx, cy, &self.regions) {
+            self.send_to(peer_id, &ServerMsg::ClaimResult { ok: false });
+            return;
+        }
+        self.claim_mgr.persist_create(&user.email_key, user.uid, cx, cy);
+        self.apply_claims_update().await;
+        self.send_to(peer_id, &ServerMsg::ClaimResult { ok: true });
+        let state = self.auth_state_for(peer_id);
+        self.send_to(peer_id, &state);
+    }
+
+    async fn handle_claim_delete(&mut self, peer_id: PeerId) {
+        let Some(user) = self.peer_user.get(&peer_id).cloned() else {
+            self.send_to(peer_id, &ServerMsg::ClaimResult { ok: false });
+            return;
+        };
+        if !self.claim_mgr.try_delete(user.uid) {
+            self.send_to(peer_id, &ServerMsg::ClaimResult { ok: false });
+            return;
+        }
+        self.claim_mgr.persist_delete(&user.email_key);
+        self.apply_claims_update().await;
+        self.send_to(peer_id, &ServerMsg::ClaimResult { ok: true });
+        let state = self.auth_state_for(peer_id);
+        self.send_to(peer_id, &state);
     }
 }
 
@@ -511,6 +606,8 @@ fn encode_capacity(msg: &ServerMsg) -> usize {
         ServerMsg::Regions { regions } => 1 + 2 + regions.len() * (8 + 8 + 4 + 4 + 1 + 4),
         ServerMsg::Sync { .. } => 1 + 8,
         ServerMsg::EditApplied { cells, .. } => 1 + 4 + 4 + 2 + cells.len() * 3,
+        ServerMsg::AuthState { name, email, .. } => 1 + 4 + 1 + 4 + 4 + 2 + name.len() + 2 + email.len(),
+        ServerMsg::ClaimResult { .. } => 1 + 1,
     }
 }
 

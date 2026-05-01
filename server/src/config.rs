@@ -1,7 +1,48 @@
-use serde::Deserialize;
+use figment::{Figment, providers::{Env, Format, Serialized, Toml}};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize)]
+/// A single OIDC/OAuth2 provider. Routes: `/auth/{name}` and `/auth/{name}/callback`.
+///
+/// Two modes:
+/// - **OIDC** (`issuer_url` set): endpoints are discovered from the issuer's
+///   `/.well-known/openid-configuration`. Works out of the box for Google, GitLab,
+///   Auth0, Keycloak, etc.
+/// - **Plain OAuth2** (no `issuer_url`): `auth_url`, `token_url`, and `userinfo_url`
+///   must all be provided. Use for providers that do not implement OIDC (e.g. GitHub).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcProvider {
+    /// URL slug used in route paths (e.g. `"google"`). Must be URL-safe.
+    pub name: String,
+    pub client_id: String,
+    pub client_secret: String,
+    /// OIDC issuer URL. When set, all endpoints are discovered automatically.
+    pub issuer_url: Option<String>,
+    /// OAuth2-only: authorization endpoint URL (required when `issuer_url` is absent).
+    pub auth_url: Option<String>,
+    /// OAuth2-only: token endpoint URL (required when `issuer_url` is absent).
+    pub token_url: Option<String>,
+    /// OAuth2-only: userinfo endpoint URL (required when `issuer_url` is absent).
+    pub userinfo_url: Option<String>,
+    /// Human-readable label shown in the login modal.
+    pub display_name: Option<String>,
+}
+
+impl OidcProvider {
+    pub fn display(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Redirect URI derived from `base_url` — never configured manually.
+    pub fn redirect_uri(&self, base_url: &str) -> String {
+        format!("{}/auth/{}/callback", base_url.trim_end_matches('/'), self.name)
+    }
+}
+
+/// Central server configuration.
+/// Loading order: built-in defaults < TOML file < `NETGOL_` env vars.
+/// Every field is individually overridable via `NETGOL_<FIELD_NAME>` in upper-snake-case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub bind: String,
     pub metrics_bind: String,
@@ -11,38 +52,61 @@ pub struct Config {
     pub snapshot_path: PathBuf,
     pub snapshot_interval_ticks: u64,
     pub regions_path: PathBuf,
-    /// Hard cap on a single peer's subscribed chunk set. Bounds per-peer server
-    /// memory (peer.subscribed + chunk_subs reverse index entries). Overridable
-    /// via the `CLIENT_MAX_CHUNKS` env var; defaults to the wire u16 limit.
-    #[serde(default = "default_client_max_chunks")]
+
     pub client_max_chunks: u32,
 
-    #[serde(default = "default_osc_interval_ms")]
     pub oscillator_detection_interval_ms: u64,
-    #[serde(default = "default_osc_budget")]
     pub oscillator_detection_max_chunks_per_step: usize,
-    #[serde(default = "default_osc_promote_per_tick")]
     pub oscillator_promote_max_per_tick: usize,
-    #[serde(default = "default_osc_max_group")]
     pub oscillator_max_group_size: usize,
+
+    /// Publicly reachable base URL (no trailing slash).
+    /// Used to construct OIDC redirect URIs and any other absolute URLs.
+    pub base_url: String,
+
+    pub oidc_providers: Vec<OidcProvider>,
+    pub jwt_secret: String,
+
+    pub claim_w_chunks: u32,
+    pub claim_h_chunks: u32,
+    pub users_dir: PathBuf,
+    pub claims_dir: PathBuf,
 }
 
-fn default_client_max_chunks() -> u32 { 65535 }
-fn default_osc_interval_ms() -> u64 { 250 }
-fn default_osc_budget() -> usize { 1000 }
-fn default_osc_promote_per_tick() -> usize { 256 }
-fn default_osc_max_group() -> usize { 16 }
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            bind: "0.0.0.0:8080".into(),
+            metrics_bind: "0.0.0.0:9090".into(),
+            tick_hz: 10,
+            max_live_chunks: 100_000,
+            peer_outbound_capacity: 4096,
+            snapshot_path: PathBuf::from("data/world.snap"),
+            snapshot_interval_ticks: 600,
+            regions_path: PathBuf::from("config/regions.toml"),
+            client_max_chunks: 65535,
+            oscillator_detection_interval_ms: 250,
+            oscillator_detection_max_chunks_per_step: 1000,
+            oscillator_promote_max_per_tick: 256,
+            oscillator_max_group_size: 16,
+            base_url: "http://localhost:8080".into(),
+            oidc_providers: Vec::new(),
+            jwt_secret: "change-me".into(),
+            claim_w_chunks: 3,
+            claim_h_chunks: 2,
+            users_dir: PathBuf::from("data/users"),
+            claims_dir: PathBuf::from("data/claims"),
+        }
+    }
+}
 
 impl Config {
     pub fn load(path: &Path) -> Self {
-        let text = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("read config {}: {e}", path.display()));
-        let mut cfg: Self = toml::from_str(&text)
-            .unwrap_or_else(|e| panic!("parse config {}: {e}", path.display()));
-        if let Ok(v) = std::env::var("CLIENT_MAX_CHUNKS") {
-            cfg.client_max_chunks = v.parse()
-                .unwrap_or_else(|e| panic!("CLIENT_MAX_CHUNKS={v:?}: {e}"));
-        }
+        let cfg: Self = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::file(path))
+            .merge(Env::prefixed("NETGOL_").split("__"))
+            .extract()
+            .unwrap_or_else(|e| panic!("config error: {e}"));
         cfg.validate();
         cfg
     }
@@ -53,5 +117,7 @@ impl Config {
         assert!(self.peer_outbound_capacity > 0, "config: peer_outbound_capacity must be > 0");
         assert!(self.max_live_chunks > 0, "config: max_live_chunks must be > 0");
         assert!(self.oscillator_max_group_size >= 2, "config: oscillator_max_group_size must be >= 2");
+        assert!(self.claim_w_chunks >= 1, "config: claim_w_chunks must be >= 1");
+        assert!(self.claim_h_chunks >= 1, "config: claim_h_chunks must be >= 1");
     }
 }

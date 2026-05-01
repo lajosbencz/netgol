@@ -5,7 +5,7 @@
 // Per-chunk frozen masks are materialised locally from the region table the
 // server sends in `Regions`. They're not on the per-chunk wire frame.
 
-import { CHUNK_SIZE, BITS_BYTES, FLAG_FROZEN, Region, EditCell } from './protocol';
+import { CHUNK_SIZE, BITS_BYTES, FLAG_FROZEN, FLAG_OWNED, Region, EditCell } from './protocol';
 export type ChunkKey = string;
 export const key = (cx: number, cy: number): ChunkKey => `${cx},${cy}`;
 
@@ -74,6 +74,8 @@ export type ChunkEntry = {
   bits: Uint8Array;
   /** Frozen mask (1 bit per cell). `null` if the chunk has no frozen cells. */
   frozenMask: Uint8Array | null;
+  /** True when this chunk belongs to a user claim (FLAG_OWNED region). */
+  owned: boolean;
   /** CHUNK_SIZExCHUNK_SIZE RGBA bitmap, repainted from `bits`. drawImage source. */
   canvas: OffscreenCanvas;
 };
@@ -82,6 +84,8 @@ export type Palette = {
   alive: [number, number, number, number];
   frozenAlive: [number, number, number, number];
   frozenDead: [number, number, number, number];
+  ownedAlive: [number, number, number, number];
+  ownedDead: [number, number, number, number];
 };
 
 export class ChunkCache {
@@ -104,6 +108,7 @@ export class ChunkCache {
     this.regions = regions;
     for (const e of this.map.values()) {
       e.frozenMask = frozenMaskForChunk(regions, e.cx, e.cy);
+      e.owned = isOwnedChunk(regions, e.cx, e.cy);
       this.repaint(e);
     }
   }
@@ -136,7 +141,8 @@ export class ChunkCache {
       entry.bits = bits;
     } else {
       const frozenMask = frozenMaskForChunk(this.regions, cx, cy);
-      entry = { cx, cy, tick, bits, frozenMask, canvas: new OffscreenCanvas(CHUNK_SIZE, CHUNK_SIZE) };
+      const owned = isOwnedChunk(this.regions, cx, cy);
+      entry = { cx, cy, tick, bits, frozenMask, owned, canvas: new OffscreenCanvas(CHUNK_SIZE, CHUNK_SIZE) };
     }
     this.repaint(entry);
     this.map.set(k, entry);
@@ -147,7 +153,7 @@ export class ChunkCache {
   private repaint(e: ChunkEntry) {
     const ctx = e.canvas.getContext('2d')!;
     if (!this.scratch) this.scratch = ctx.createImageData(CHUNK_SIZE, CHUNK_SIZE);
-    paintInto(this.scratch, e.bits, e.frozenMask, this.palette);
+    paintInto(this.scratch, e.bits, e.frozenMask, e.owned, this.palette);
     ctx.putImageData(this.scratch, 0, 0);
   }
 
@@ -221,7 +227,7 @@ export class ChunkCache {
   }
 }
 
-function paintInto(img: ImageData, bits: Uint8Array, mask: Uint8Array | null, p: Palette) {
+function paintInto(img: ImageData, bits: Uint8Array, mask: Uint8Array | null, owned: boolean, p: Palette) {
   const data = img.data;
   for (let y = 0; y < CHUNK_SIZE; y++) {
     const off = y * 8;
@@ -229,7 +235,14 @@ function paintInto(img: ImageData, bits: Uint8Array, mask: Uint8Array | null, p:
       const bit = (bits[off + (x >> 3)] >> (x & 7)) & 1;
       const frozen = mask ? (mask[off + (x >> 3)] >> (x & 7)) & 1 : 0;
       const i = (y * CHUNK_SIZE + x) * 4;
-      const c = frozen ? (bit ? p.frozenAlive : p.frozenDead) : (bit ? p.alive : null);
+      let c: [number, number, number, number] | null;
+      if (owned) {
+        c = bit ? p.ownedAlive : p.ownedDead;
+      } else if (frozen) {
+        c = bit ? p.frozenAlive : p.frozenDead;
+      } else {
+        c = bit ? p.alive : null;
+      }
       if (c) {
         data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; data[i + 3] = c[3];
       } else {
@@ -237,6 +250,20 @@ function paintInto(img: ImageData, bits: Uint8Array, mask: Uint8Array | null, p:
       }
     }
   }
+}
+
+function isOwnedChunk(regions: Region[], cx: number, cy: number): boolean {
+  const cs = BigInt(CHUNK_SIZE);
+  const chunkX0 = BigInt(cx) * cs;
+  const chunkY0 = BigInt(cy) * cs;
+  const chunkX1 = chunkX0 + cs;
+  const chunkY1 = chunkY0 + cs;
+  return regions.some(r => {
+    if ((r.flags & FLAG_OWNED) === 0) return false;
+    const rx1 = r.x + BigInt(r.w);
+    const ry1 = r.y + BigInt(r.h);
+    return rx1 > chunkX0 && r.x < chunkX1 && ry1 > chunkY0 && r.y < chunkY1;
+  });
 }
 
 function frozenMaskForChunk(regions: Region[], cx: number, cy: number): Uint8Array | null {

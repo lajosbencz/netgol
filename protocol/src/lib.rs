@@ -3,7 +3,7 @@
 //! `Chunk` payloads carry the bitset as `CHUNK_SIZE` rows x 8 bytes (LE u64), totalling
 //! [`BITS_BYTES`]. All decode errors collapse to a single [`DecodeError`] - fail early.
 
-use simulation::CHUNK_SIZE;
+use simulation::{ChunkCoord, CHUNK_SIZE};
 use std::sync::Arc;
 
 pub const BITS_BYTES: usize = CHUNK_SIZE * 8;
@@ -17,6 +17,8 @@ const TAG_HELLO: u8 = 0x05;
 const TAG_REGIONS: u8 = 0x06;
 const TAG_SYNC: u8 = 0x07;
 const TAG_EDIT_APPLIED: u8 = 0x08;
+const TAG_AUTH_STATE: u8 = 0x09;
+const TAG_CLAIM_RESULT: u8 = 0x0A;
 
 /// Region flags (bitfield, packed into `u8`).
 pub const FLAG_FROZEN: u8 = 1 << 0; // cells inside don't evolve
@@ -28,6 +30,8 @@ pub const FLAG_OWNED:  u8 = 1 << 2; // `owner` field is meaningful
 const TAG_SUBSCRIBE: u8 = 0x10;
 const TAG_UNSUBSCRIBE: u8 = 0x11;
 const TAG_EDIT: u8 = 0x12;
+const TAG_CLAIM_CREATE: u8 = 0x13;
+const TAG_CLAIM_DELETE: u8 = 0x14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Region {
@@ -62,6 +66,16 @@ pub enum ServerMsg {
     /// patch their local bits then let the next `Sync` drive the GoL step.
     /// Cells are all in the same chunk (cx, cy); wire encodes only lx/ly/alive.
     EditApplied { cx: i32, cy: i32, cells: Vec<EditCell> },
+    /// Sent after WebSocket join and after any auth/claim state change.
+    /// `uid == 0` means anonymous. `claim` is `None` when the user has no active claim.
+    AuthState {
+        uid: u32,
+        claim: Option<ChunkCoord>,
+        name: String,
+        email: String,
+    },
+    /// Response to a `ClaimCreate` or `ClaimDelete` client message.
+    ClaimResult { ok: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +83,8 @@ pub enum ClientMsg {
     Subscribe(Vec<(i32, i32)>),
     Unsubscribe(Vec<(i32, i32)>),
     Edit(Vec<EditCell>),
+    ClaimCreate(ChunkCoord),
+    ClaimDelete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +173,32 @@ pub fn encode_server(msg: &ServerMsg, out: &mut Vec<u8>) {
                 out.push(u8::from(c.alive));
             }
         }
+        ServerMsg::AuthState { uid, claim, name, email } => {
+            out.push(TAG_AUTH_STATE);
+            out.extend_from_slice(&uid.to_le_bytes());
+            match claim {
+                Some((cx, cy)) => {
+                    out.push(1u8);
+                    out.extend_from_slice(&cx.to_le_bytes());
+                    out.extend_from_slice(&cy.to_le_bytes());
+                }
+                None => {
+                    out.push(0u8);
+                    out.extend_from_slice(&0i32.to_le_bytes());
+                    out.extend_from_slice(&0i32.to_le_bytes());
+                }
+            }
+            let nb = u16::try_from(name.len()).expect("name >= 65536 bytes");
+            out.extend_from_slice(&nb.to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            let eb = u16::try_from(email.len()).expect("email >= 65536 bytes");
+            out.extend_from_slice(&eb.to_le_bytes());
+            out.extend_from_slice(email.as_bytes());
+        }
+        ServerMsg::ClaimResult { ok } => {
+            out.push(TAG_CLAIM_RESULT);
+            out.push(u8::from(*ok));
+        }
     }
 }
 
@@ -215,6 +257,21 @@ pub fn decode_server(buf: &[u8]) -> Result<ServerMsg, DecodeError> {
             }
             Ok(ServerMsg::EditApplied { cx, cy, cells })
         }
+        TAG_AUTH_STATE => {
+            let uid = r.u32()?;
+            let has_claim = r.u8()? != 0;
+            let claim_cx = r.i32()?;
+            let claim_cy = r.i32()?;
+            let claim = if has_claim { Some((claim_cx, claim_cy)) } else { None };
+            let nb = r.u16()? as usize;
+            let name = String::from_utf8(r.take(nb)?.to_vec())
+                .map_err(|_| DecodeError::Truncated)?;
+            let eb = r.u16()? as usize;
+            let email = String::from_utf8(r.take(eb)?.to_vec())
+                .map_err(|_| DecodeError::Truncated)?;
+            Ok(ServerMsg::AuthState { uid, claim, name, email })
+        }
+        TAG_CLAIM_RESULT => Ok(ServerMsg::ClaimResult { ok: r.u8()? != 0 }),
         t => Err(DecodeError::UnknownTag(t)),
     }
 }
@@ -241,6 +298,14 @@ pub fn encode_client(msg: &ClientMsg, out: &mut Vec<u8>) {
                 out.push(u8::from(c.alive));
             }
         }
+        ClientMsg::ClaimCreate((cx, cy)) => {
+            out.push(TAG_CLAIM_CREATE);
+            out.extend_from_slice(&cx.to_le_bytes());
+            out.extend_from_slice(&cy.to_le_bytes());
+        }
+        ClientMsg::ClaimDelete => {
+            out.push(TAG_CLAIM_DELETE);
+        }
     }
 }
 
@@ -266,6 +331,8 @@ pub fn decode_client(buf: &[u8]) -> Result<ClientMsg, DecodeError> {
             }
             Ok(ClientMsg::Edit(cells))
         }
+        TAG_CLAIM_CREATE => Ok(ClientMsg::ClaimCreate((r.i32()?, r.i32()?))),
+        TAG_CLAIM_DELETE => Ok(ClientMsg::ClaimDelete),
         t => Err(DecodeError::UnknownTag(t)),
     }
 }
@@ -401,6 +468,10 @@ mod tests {
                 EditCell { cx: -3, cy: 7, lx: 63, ly: 63, alive: false },
             ]},
             ServerMsg::EditApplied { cx: 0, cy: 0, cells: vec![] },
+            ServerMsg::AuthState { uid: 42, claim: Some((-3, 7)), name: "Alice".into(), email: "a@b.com".into() },
+            ServerMsg::AuthState { uid: 0, claim: None, name: String::new(), email: String::new() },
+            ServerMsg::ClaimResult { ok: true },
+            ServerMsg::ClaimResult { ok: false },
         ];
         for msg in &cases {
             let mut buf = Vec::new();
@@ -419,6 +490,8 @@ mod tests {
                 EditCell { cx: 1, cy: 2, lx: 0, ly: 0, alive: true },
                 EditCell { cx: -1, cy: 0, lx: 31, ly: 31, alive: false },
             ]),
+            ClientMsg::ClaimCreate((-5, 3)),
+            ClientMsg::ClaimDelete,
         ];
         for msg in &cases {
             let mut buf = Vec::new();

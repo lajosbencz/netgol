@@ -99,10 +99,22 @@ fn apply_frozen(world: &mut World, r: &Region) {
     world.freeze_rect(r.x, r.y, r.w, r.h);
 }
 
-/// Returns true if `(x, y)` lies inside any region carrying `FLAG_LOCKED`.
-pub fn is_locked(regions: &[Region], x: i64, y: i64) -> bool {
-    regions.iter().any(|r| r.flags & FLAG_LOCKED != 0 && contains(r, x, y))
+/// Returns whether `editor_uid` is allowed to edit the cell at `(x, y)`.
+/// - No locking region: always allowed.
+/// - Static locked region (LOCKED without OWNED): never allowed.
+/// - Owned region (LOCKED | OWNED): allowed only for the owner.
+pub fn can_edit(regions: &[Region], x: i64, y: i64, editor_uid: Option<u32>) -> bool {
+    for r in regions {
+        if !contains(r, x, y) { continue; }
+        if r.flags & FLAG_LOCKED == 0 { continue; }
+        if r.flags & FLAG_OWNED != 0 {
+            return editor_uid == Some(r.owner);
+        }
+        return false;
+    }
+    true
 }
+
 
 fn contains(r: &Region, x: i64, y: i64) -> bool {
     x >= r.x && x < r.x + i64::from(r.w) && y >= r.y && y < r.y + i64::from(r.h)

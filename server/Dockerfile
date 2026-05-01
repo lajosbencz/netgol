@@ -36,7 +36,7 @@ WORKDIR /app
 COPY --from=builder /lazos-server /app/lazos-server
 COPY config /app/config
 
-ENV LAZOS_CONFIG=/app/config/server.toml
+ENV NETGOL_CONFIG=/app/config/server.toml
 ENV RUST_LOG=info
 
 EXPOSE 8080 9090

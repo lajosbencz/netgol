@@ -10,20 +10,23 @@ import { Selection } from './selection';
 import { Stamp, stampAnchor } from './stamps';
 
 export type Ghost = { stamp: Stamp; x: number; y: number } | null;
+export type ClaimPreview = { cursorCx: number; cursorCy: number; claimW: number; claimH: number } | null;
 
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private bg: string;
   private alive: string;
   private accent: string;
+  private ownedAlive: string;
 
-  constructor(private canvas: HTMLCanvasElement, bgCss: string, aliveCss: string, accentCss: string) {
+  constructor(private canvas: HTMLCanvasElement, bgCss: string, aliveCss: string, accentCss: string, ownedAliveCss: string) {
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) throw new Error('no 2d context');
     this.ctx = ctx;
     this.bg = bgCss;
     this.alive = aliveCss;
     this.accent = accentCss;
+    this.ownedAlive = ownedAliveCss;
   }
 
   resize(w: number, h: number) {
@@ -34,7 +37,7 @@ export class Renderer {
     this.canvas.style.height = `${h}px`;
   }
 
-  render(cam: Camera, cache: ChunkCache, selection: Selection, ghost: Ghost) {
+  render(cam: Camera, cache: ChunkCache, selection: Selection, ghost: Ghost, claimPreview: ClaimPreview = null) {
     const { ctx, canvas } = this;
     const dpr = window.devicePixelRatio || 1;
     const vw = canvas.width / dpr;
@@ -61,6 +64,7 @@ export class Renderer {
     }
 
     this.drawSelection(cam, vw, vh, selection);
+    if (claimPreview) this.drawClaimPreview(cam, vw, vh, claimPreview);
     if (ghost) this.drawGhost(cam, vw, vh, ghost);
   }
 
@@ -100,6 +104,30 @@ export class Renderer {
     ctx.lineWidth = 1.5;
     ctx.strokeStyle = this.accent;
     ctx.strokeRect(ox + b.x * z, oy + b.y * z, b.w * z, b.h * z);
+    ctx.restore();
+  }
+
+  private drawClaimPreview(cam: Camera, vw: number, vh: number, p: NonNullable<ClaimPreview>) {
+    const { ctx } = this;
+    const z = cam.zoom;
+    const cs = CHUNK_SIZE * z;
+    const ox = vw / 2 - cam.x * z;
+    const oy = vh / 2 - cam.y * z;
+    const tlCx = p.cursorCx - Math.floor(p.claimW / 2);
+    const tlCy = p.cursorCy - Math.floor(p.claimH / 2);
+    const px = ox + tlCx * cs;
+    const py = oy + tlCy * cs;
+    const pw = p.claimW * cs;
+    const ph = p.claimH * cs;
+    ctx.save();
+    ctx.globalAlpha = 0.2;
+    ctx.fillStyle = this.ownedAlive;
+    ctx.fillRect(px, py, pw, ph);
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = this.ownedAlive;
+    ctx.strokeRect(px, py, pw, ph);
     ctx.restore();
   }
 

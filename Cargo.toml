@@ -17,6 +17,16 @@ wasm-bindgen = "0.2"
 
 # server
 axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
+oauth2 = "4"
+openidconnect = { version = "3", features = ["reqwest"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+jsonwebtoken = "9"
+sha2 = "0.10"
+hex = "0.4"
+serde_json = "1"
+time = "0.3"
+figment = { version = "0.10", features = ["toml", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "fs", "io-util", "signal"] }
 bytes = "1"
 prometheus = { version = "0.13", default-features = false }

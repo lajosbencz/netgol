@@ -17,4 +17,4 @@ mod wasm;
 
 pub use chunk::{Chunk, EdgeBundle, FrozenMask, StepResult};
 pub use oscillator::{Detector, HashReport, Oscillator, PromoteRequest, MAX_PERIOD};
-pub use world::{ChunkCoord, TickOutcome, World};
+pub use world::{ChunkCoord, CoordHasher, CoordMap, TickOutcome, World};

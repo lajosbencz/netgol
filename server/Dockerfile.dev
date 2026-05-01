@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && cargo install cargo-watch --locked
 
 WORKDIR /app
-ENV LAZOS_CONFIG=/app/config/server.toml
+ENV NETGOL_CONFIG=/app/config/server.toml
 ENV RUST_LOG=info
 EXPOSE 8080 9090
 

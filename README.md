@@ -28,6 +28,12 @@ One shared, persistent, effectively-infinite world that any number of clients ca
   Work scales with *active* cells, not world size.
 - **WAL + atomic snapshots.**
   Per-tick batch fsync, snapshots are written off the sim task by a dedicated I/O task and truncate the WAL on success.
+- **Client-side GoL prediction.**
+  Clients run the same bit-parallel kernel in WASM (scalar and SIMD128 variants).
+  The server only sends a `ChunkDelta` for chunks with live boundary cells - those
+  that interact with unseen neighbors the client cannot predict alone.
+  Interior chunks are advanced locally, cutting per-tick bandwidth proportionally
+  to the fraction of boundary-active chunks in the viewport.
 - **Hand-rolled binary wire protocol.**
   Little-endian, tag-prefixed frames.
 - **Single render path.**
