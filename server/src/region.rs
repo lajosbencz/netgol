@@ -82,14 +82,12 @@ pub fn load(world: &mut World, path: &Path) -> Vec<Region> {
                     total_cells += 1;
                 }
             }
-            // Per-cell freeze already applied above; apply_frozen not needed.
         }
 
         let region = Region { x: ox, y: oy, w, h, flags, owner: entry.owner.unwrap_or(0) };
 
-        // For non-pattern frozen regions, freeze cells at their current snapshot value.
         if region.flags & FLAG_FROZEN != 0 && entry.pattern.is_none() {
-            apply_frozen(world, &region);
+            world.freeze_rect(region.x, region.y, region.w, region.h);
         }
 
         out.push(region);
@@ -105,10 +103,6 @@ pub fn load(world: &mut World, path: &Path) -> Vec<Region> {
     out
 }
 
-/// Mark every cell inside `region` as frozen at its current alive value.
-fn apply_frozen(world: &mut World, r: &Region) {
-    world.freeze_rect(r.x, r.y, r.w, r.h);
-}
 
 /// Returns whether `editor_uid` is allowed to edit the cell at `(x, y)`.
 /// - No locking region: always allowed.
