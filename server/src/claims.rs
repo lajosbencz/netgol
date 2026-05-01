@@ -2,7 +2,7 @@
 //! derivations the hub needs without leaking file-I/O details into hub.rs.
 
 use crate::claim_store::{Claim, ClaimStore};
-use protocol::{Region, FLAG_LOCKED, FLAG_OWNED};
+use protocol::{Region, FLAG_FROZEN, FLAG_LOCKED, FLAG_OWNED};
 use simulation::{ChunkCoord, CoordMap, CHUNK_SIZE, CHUNK_SIZE_I64};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ impl ClaimManager {
     }
 
     /// Place or move a claim for `user_id`. Returns false if the target region
-    /// overlaps another user's locked region (same-user replacement is allowed).
+    /// overlaps any locked or frozen region (same-user replacement is allowed).
     pub fn try_create(
         &mut self,
         user_id: u32,
@@ -37,7 +37,7 @@ impl ClaimManager {
         let w = self.claim_w as i64 * CHUNK_SIZE_I64;
         let h = self.claim_h as i64 * CHUNK_SIZE_I64;
         let overlaps = regions.iter().any(|r| {
-            if r.flags & FLAG_LOCKED == 0 { return false; }
+            if r.flags & (FLAG_LOCKED | FLAG_FROZEN) == 0 { return false; }
             // Same user's own prior claim is replaced — no conflict.
             if r.flags & FLAG_OWNED != 0 && r.owner == user_id { return false; }
             // Geometric overlap check.
