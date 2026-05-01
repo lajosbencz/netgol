@@ -14,8 +14,12 @@ use std::path::{Path, PathBuf};
 pub struct OidcProvider {
     /// URL slug used in route paths (e.g. `"google"`). Must be URL-safe.
     pub name: String,
-    pub client_id: String,
-    pub client_secret: String,
+    /// Supplied via env to avoid storing secrets in config files.
+    /// e.g. `NETGOL_OIDC_PROVIDERS_0__CLIENT_ID`
+    pub client_id: Option<String>,
+    /// Supplied via env to avoid storing secrets in config files.
+    /// e.g. `NETGOL_OIDC_PROVIDERS_0__CLIENT_SECRET`
+    pub client_secret: Option<String>,
     /// OIDC issuer URL. When set, all endpoints are discovered automatically.
     pub issuer_url: Option<String>,
     /// OAuth2-only: authorization endpoint URL (required when `issuer_url` is absent).

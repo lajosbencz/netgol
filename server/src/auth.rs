@@ -77,6 +77,11 @@ impl AuthState {
 }
 
 async fn build_client(provider: &OidcProvider, base_url: &str) -> Result<ProviderClient, String> {
+    let client_id = provider.client_id.as_deref()
+        .ok_or("client_id missing (set NETGOL_OIDC_PROVIDERS_N__CLIENT_ID)")?;
+    let client_secret = provider.client_secret.as_deref()
+        .ok_or("client_secret missing (set NETGOL_OIDC_PROVIDERS_N__CLIENT_SECRET)")?;
+
     let redirect = RedirectUrl::new(provider.redirect_uri(base_url))
         .map_err(|e| format!("bad redirect_uri: {e}"))?;
 
@@ -88,8 +93,8 @@ async fn build_client(provider: &OidcProvider, base_url: &str) -> Result<Provide
             .map_err(|e| format!("OIDC discovery failed: {e}"))?;
         let client = CoreClient::from_provider_metadata(
             metadata,
-            ClientId::new(provider.client_id.clone()),
-            Some(ClientSecret::new(provider.client_secret.clone())),
+            ClientId::new(client_id.to_string()),
+            Some(ClientSecret::new(client_secret.to_string())),
         )
         .set_redirect_uri(redirect);
         return Ok(ProviderClient::Oidc(client));
@@ -102,8 +107,8 @@ async fn build_client(provider: &OidcProvider, base_url: &str) -> Result<Provide
     let userinfo_url = provider.userinfo_url.clone()
         .ok_or("userinfo_url required for non-OIDC provider")?;
     let client = BasicClient::new(
-        ClientId::new(provider.client_id.clone()),
-        Some(ClientSecret::new(provider.client_secret.clone())),
+        ClientId::new(client_id.to_string()),
+        Some(ClientSecret::new(client_secret.to_string())),
         AuthUrl::new(auth_url.to_string()).map_err(|e| format!("bad auth_url: {e}"))?,
         Some(TokenUrl::new(token_url.to_string()).map_err(|e| format!("bad token_url: {e}"))?),
     )
