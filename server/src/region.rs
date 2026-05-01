@@ -63,10 +63,12 @@ pub fn load(world: &mut World, path: &Path) -> Vec<Region> {
         };
 
         if let Some(pat) = &entry.pattern {
-            // Clear the full rect first so snapshot state doesn't bleed through dots.
+            // Use freeze_cell for both passes: set() silently ignores frozen cells
+            // (snapshot carries the mask from previous runs), so we must bypass
+            // the frozen guard to ensure the rect is authoritative on every boot.
             for dy in 0..h as i64 {
                 for dx in 0..w as i64 {
-                    world.set_cell(ox + dx, oy + dy, false);
+                    world.freeze_cell(ox + dx, oy + dy, false);
                 }
             }
             for (row_idx, line) in pat.lines().enumerate() {
@@ -76,20 +78,17 @@ pub fn load(world: &mut World, path: &Path) -> Vec<Region> {
                         '.' | ' ' => continue,
                         _ => panic!("region pattern char {ch:?} invalid (use '#', '.', ' ')"),
                     };
-                    let x = ox + col_idx as i64;
-                    let y = oy + row_idx as i64;
-                    world.set_cell(x, y, alive);
+                    world.freeze_cell(ox + col_idx as i64, oy + row_idx as i64, alive);
                     total_cells += 1;
                 }
             }
+            // Per-cell freeze already applied above; apply_frozen not needed.
         }
 
         let region = Region { x: ox, y: oy, w, h, flags, owner: entry.owner.unwrap_or(0) };
 
-        // Apply FROZEN immediately to the simulation world so the bit-parallel
-        // step's per-chunk mask is correctly populated. (This is the only flag
-        // sim cares about; LOCKED and OWNED are hub-side concerns.)
-        if region.flags & FLAG_FROZEN != 0 {
+        // For non-pattern frozen regions, freeze cells at their current snapshot value.
+        if region.flags & FLAG_FROZEN != 0 && entry.pattern.is_none() {
             apply_frozen(world, &region);
         }
 
