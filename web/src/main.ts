@@ -12,7 +12,7 @@ import { ControlsUi } from './controls_ui';
 import { applyUrlToCamera, UrlSync } from './url_sync';
 import { mountIcons } from './icons';
 import { Links } from './links';
-import { AuthUi, AuthInfo, Provider } from './auth_ui';
+import { AuthUi, AuthInfo } from './auth_ui';
 
 const styles = getComputedStyle(document.documentElement);
 const cssVar = (name: string, fallback: string) =>
@@ -225,6 +225,7 @@ function connect() {
         cache.step(msg.tick);
         break;
       case 'AuthState': {
+        if (msg.providers.length > 0) authUi.setProviders(msg.providers);
         const info: AuthInfo = { uid: msg.uid, name: msg.name, email: msg.email, claim: msg.claim };
         authUi.setAuth(msg.uid !== 0 ? info : null);
         break;
@@ -236,12 +237,6 @@ function connect() {
     scheduleFrame();
   });
 }
-
-// Fetch provider list once; non-critical if it fails.
-fetch('/auth/providers')
-  .then(r => r.json())
-  .then((providers: Provider[]) => authUi.setProviders(providers))
-  .catch(() => {});
 
 connect();
 

@@ -74,6 +74,10 @@ impl AuthState {
     fn client(&self, name: &str) -> Option<&ProviderClient> {
         self.clients.get(name)
     }
+
+    pub fn active_provider_slugs(&self) -> impl Iterator<Item = &String> {
+        self.clients.keys()
+    }
 }
 
 async fn build_client(name: &str, provider: &OidcProvider, base_url: &str) -> Result<ProviderClient, String> {

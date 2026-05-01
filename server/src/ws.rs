@@ -65,9 +65,9 @@ async fn handle(
             user: PeerUser { uid: claims.uid, email_key: claims.sub.clone() },
         }).await;
         let (name, email, claim) = load_auth_info(&state, &claims.sub).await;
-        send_msg!(ServerMsg::AuthState { uid: claims.uid, claim, name, email });
+        send_msg!(ServerMsg::AuthState { uid: claims.uid, claim, name, email, providers: available_providers(&state) });
     } else {
-        send_msg!(ServerMsg::AuthState { uid: 0, claim: None, name: String::new(), email: String::new() });
+        send_msg!(ServerMsg::AuthState { uid: 0, claim: None, name: String::new(), email: String::new(), providers: available_providers(&state) });
     }
 
     loop {
@@ -120,6 +120,17 @@ async fn handle(
     }
 
     let _ = state.hub.send(HubCmd::Leave { peer_id }).await;
+}
+
+fn available_providers(state: &WsState) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = state.auth.active_provider_slugs()
+        .filter_map(|slug| {
+            let p = state.auth.cfg.oidc_providers.get(slug)?;
+            Some((slug.clone(), p.display(slug).to_string()))
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
 }
 
 async fn load_auth_info(

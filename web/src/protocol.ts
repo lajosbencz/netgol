@@ -39,7 +39,7 @@ export type ServerMsg =
   | { kind: 'Stats'; tick: bigint; liveChunks: number; tickRateHz: number; tickUtilization: number }
   | { kind: 'Sync'; tick: bigint }
   | { kind: 'EditApplied'; cx: number; cy: number; cells: EditCell[] }
-  | { kind: 'AuthState'; uid: number; claim: [number, number] | null; name: string; email: string }
+  | { kind: 'AuthState'; uid: number; claim: [number, number] | null; name: string; email: string; providers: { slug: string; name: string }[] }
   | { kind: 'ClaimResult'; ok: boolean };
 
 export type EditCell = { cx: number; cy: number; lx: number; ly: number; alive: boolean };
@@ -108,7 +108,14 @@ export function decodeServer(buf: ArrayBuffer): ServerMsg {
       const name = new TextDecoder().decode(r.bytes(nameLen));
       const emailLen = r.u16();
       const email = new TextDecoder().decode(r.bytes(emailLen));
-      return { kind: 'AuthState', uid, claim, name, email };
+      const pc = r.u8();
+      const providers: { slug: string; name: string }[] = [];
+      for (let i = 0; i < pc; i++) {
+        const sl = r.u8(); const slug = new TextDecoder().decode(r.bytes(sl));
+        const dl = r.u8(); const pname = new TextDecoder().decode(r.bytes(dl));
+        providers.push({ slug, name: pname });
+      }
+      return { kind: 'AuthState', uid, claim, name, email, providers };
     }
     case TAG_CLAIM_RESULT:
       return { kind: 'ClaimResult', ok: r.u8() !== 0 };

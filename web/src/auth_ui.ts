@@ -1,4 +1,4 @@
-import { createIcons, LogIn, MapPin, Trash2, X } from 'lucide';
+import { mountIcons } from './icons';
 import { Camera } from './viewport';
 import { encodeClient } from './protocol';
 
@@ -134,7 +134,7 @@ export class AuthUi {
     overlay.appendChild(box);
     document.body.appendChild(overlay);
     this.modal = overlay;
-    createIcons({ icons: { LogIn, X } });
+    mountIcons();
   }
 
   private closeModal() {
@@ -149,7 +149,7 @@ export class AuthUi {
     } else {
       this.renderAnonymous();
     }
-    createIcons({ icons: { LogIn, MapPin, Trash2 } });
+    mountIcons();
   }
 
   private renderAnonymous() {

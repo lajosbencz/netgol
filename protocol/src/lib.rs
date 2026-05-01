@@ -68,11 +68,14 @@ pub enum ServerMsg {
     EditApplied { cx: i32, cy: i32, cells: Vec<EditCell> },
     /// Sent after WebSocket join and after any auth/claim state change.
     /// `uid == 0` means anonymous. `claim` is `None` when the user has no active claim.
+    /// `providers` lists the configured login providers (slug, display name).
+    /// Empty on post-claim updates — clients already have the list from the initial message.
     AuthState {
         uid: u32,
         claim: Option<ChunkCoord>,
         name: String,
         email: String,
+        providers: Vec<(String, String)>,
     },
     /// Response to a `ClaimCreate` or `ClaimDelete` client message.
     ClaimResult { ok: bool },
@@ -173,7 +176,7 @@ pub fn encode_server(msg: &ServerMsg, out: &mut Vec<u8>) {
                 out.push(u8::from(c.alive));
             }
         }
-        ServerMsg::AuthState { uid, claim, name, email } => {
+        ServerMsg::AuthState { uid, claim, name, email, providers } => {
             out.push(TAG_AUTH_STATE);
             out.extend_from_slice(&uid.to_le_bytes());
             match claim {
@@ -194,6 +197,13 @@ pub fn encode_server(msg: &ServerMsg, out: &mut Vec<u8>) {
             let eb = u16::try_from(email.len()).expect("email >= 65536 bytes");
             out.extend_from_slice(&eb.to_le_bytes());
             out.extend_from_slice(email.as_bytes());
+            out.push(u8::try_from(providers.len()).expect("providers >= 256"));
+            for (slug, display) in providers {
+                out.push(u8::try_from(slug.len()).expect("slug >= 256"));
+                out.extend_from_slice(slug.as_bytes());
+                out.push(u8::try_from(display.len()).expect("display >= 256"));
+                out.extend_from_slice(display.as_bytes());
+            }
         }
         ServerMsg::ClaimResult { ok } => {
             out.push(TAG_CLAIM_RESULT);
@@ -269,7 +279,18 @@ pub fn decode_server(buf: &[u8]) -> Result<ServerMsg, DecodeError> {
             let eb = r.u16()? as usize;
             let email = String::from_utf8(r.take(eb)?.to_vec())
                 .map_err(|_| DecodeError::Truncated)?;
-            Ok(ServerMsg::AuthState { uid, claim, name, email })
+            let pc = r.u8()? as usize;
+            let mut providers = Vec::with_capacity(pc);
+            for _ in 0..pc {
+                let sl = r.u8()? as usize;
+                let slug = String::from_utf8(r.take(sl)?.to_vec())
+                    .map_err(|_| DecodeError::Truncated)?;
+                let dl = r.u8()? as usize;
+                let display = String::from_utf8(r.take(dl)?.to_vec())
+                    .map_err(|_| DecodeError::Truncated)?;
+                providers.push((slug, display));
+            }
+            Ok(ServerMsg::AuthState { uid, claim, name, email, providers })
         }
         TAG_CLAIM_RESULT => Ok(ServerMsg::ClaimResult { ok: r.u8()? != 0 }),
         t => Err(DecodeError::UnknownTag(t)),
@@ -468,8 +489,8 @@ mod tests {
                 EditCell { cx: -3, cy: 7, lx: 63, ly: 63, alive: false },
             ]},
             ServerMsg::EditApplied { cx: 0, cy: 0, cells: vec![] },
-            ServerMsg::AuthState { uid: 42, claim: Some((-3, 7)), name: "Alice".into(), email: "a@b.com".into() },
-            ServerMsg::AuthState { uid: 0, claim: None, name: String::new(), email: String::new() },
+            ServerMsg::AuthState { uid: 42, claim: Some((-3, 7)), name: "Alice".into(), email: "a@b.com".into(), providers: vec![("google".into(), "Google".into())] },
+            ServerMsg::AuthState { uid: 0, claim: None, name: String::new(), email: String::new(), providers: Vec::new() },
             ServerMsg::ClaimResult { ok: true },
             ServerMsg::ClaimResult { ok: false },
         ];

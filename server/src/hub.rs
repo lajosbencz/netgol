@@ -546,14 +546,14 @@ impl Hub {
 
     fn auth_state_for(&self, peer_id: PeerId) -> ServerMsg {
         let Some(user) = self.peer_user.get(&peer_id) else {
-            return ServerMsg::AuthState { uid: 0, claim: None, name: String::new(), email: String::new() };
+            return ServerMsg::AuthState { uid: 0, claim: None, name: String::new(), email: String::new(), providers: Vec::new() };
         };
         ServerMsg::AuthState {
             uid: user.uid,
             claim: self.claim_mgr.find_for_user(user.uid),
-            // Name/email not stored in hub; ws sends the full initial AuthState from disk.
             name: String::new(),
             email: String::new(),
+            providers: Vec::new(),
         }
     }
 
@@ -606,7 +606,9 @@ fn encode_capacity(msg: &ServerMsg) -> usize {
         ServerMsg::Regions { regions } => 1 + 2 + regions.len() * (8 + 8 + 4 + 4 + 1 + 4),
         ServerMsg::Sync { .. } => 1 + 8,
         ServerMsg::EditApplied { cells, .. } => 1 + 4 + 4 + 2 + cells.len() * 3,
-        ServerMsg::AuthState { name, email, .. } => 1 + 4 + 1 + 4 + 4 + 2 + name.len() + 2 + email.len(),
+        ServerMsg::AuthState { name, email, providers, .. } =>
+            1 + 4 + 1 + 4 + 4 + 2 + name.len() + 2 + email.len()
+            + 1 + providers.iter().map(|(s, d)| 1 + s.len() + 1 + d.len()).sum::<usize>(),
         ServerMsg::ClaimResult { .. } => 1 + 1,
     }
 }
