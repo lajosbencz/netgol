@@ -66,6 +66,7 @@ pub fn spawn(
     metrics: Arc<Metrics>,
 ) -> mpsc::Sender<HubCmd> {
     let (tx, rx) = mpsc::channel(1024);
+    let static_locked_chunks = region::locked_chunks(&static_regions);
     let regions = claim_mgr.build_regions(&static_regions);
     let owned_chunk_set = claim_mgr.owned_chunk_set();
     let hub = Hub {
@@ -76,6 +77,7 @@ pub fn spawn(
         last_seen_tick: HashMap::new(),
         mirror: HashMap::new(),
         static_regions,
+        static_locked_chunks,
         claim_mgr,
         peer_user: HashMap::new(),
         owned_chunk_set,
@@ -105,6 +107,8 @@ struct Hub {
     mirror: HashMap<ChunkCoord, MirrorEntry>,
     /// Immutable static regions from regions.toml.
     static_regions: Arc<[Region]>,
+    /// Chunks covered by static FLAG_LOCKED regions; merged with claim chunks for SetOwned.
+    static_locked_chunks: simulation::CoordMap<()>,
     claim_mgr: ClaimManager,
     /// Per-peer authenticated user info.
     peer_user: HashMap<PeerId, PeerUser>,
@@ -536,7 +540,8 @@ impl Hub {
     async fn apply_claims_update(&mut self) {
         self.regions = self.claim_mgr.build_regions(&self.static_regions);
         self.owned_chunk_set = self.claim_mgr.owned_chunk_set();
-        let owned = self.claim_mgr.owned_coord_map();
+        let mut owned = self.claim_mgr.owned_coord_map();
+        owned.extend(self.static_locked_chunks.iter().map(|(k, v)| (*k, *v)));
         if let Err(e) = self.sim_cmd_tx.send(SimCmd::SetOwned(owned)).await {
             tracing::error!(err = %e, "sim cmd closed during SetOwned");
         }

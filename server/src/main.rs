@@ -58,8 +58,10 @@ async fn main() {
         cfg.claim_h_chunks,
     ).await;
 
-    // Seed world owned chunks from persisted claims before first tick.
-    world.set_owned_chunks(claim_mgr.owned_coord_map());
+    // Seed world owned chunks: static locked regions + persisted user claims.
+    let mut initial_owned = region::locked_chunks(&static_regions);
+    initial_owned.extend(claim_mgr.owned_coord_map());
+    world.set_owned_chunks(initial_owned);
 
     let auth_state = Arc::new(auth::AuthState::new(cfg.clone(), Arc::clone(&user_store)).await);
 
